@@ -533,62 +533,67 @@ fn prepare_headers(algorithm: &str, headers: Option<&Bound<'_, PyDict>>, sort_he
 }
 
 
-fn prepare_validation(algorithms: Option<Vec<String>>, options: Option<&Bound<'_, PyDict>>,
+fn prepare_validation(
+    algorithms: Option<Vec<String>>, options: Option<&Bound<'_, PyDict>>, verify_arg: Option<bool>, leeway_arg: f64,
     ) -> PyResult<(Validation, bool, bool, bool, bool, bool, bool, bool)> { 
+    
+    let verify_signature = if let Some(opts) = options && let Some(val) = opts.get_item(
+        "verify_signature")? {
+            val.extract::<bool>()? } else if let Some(false) = verify_arg {false} else { true };
+    
+    // Claim flags
+    let get_flag = |key: &str, default: bool| -> PyResult<bool> {
+        if let Some(opts) = options {
+            if let Some(val) = opts.get_item(key)? {
+                return val.extract::<bool>();
+            }
+        }
+        Ok(default)
+    };
 
+    let check_exp = get_flag("verify_exp", verify_signature)?;
+    let check_nbf = get_flag("verify_nbf", verify_signature)?;
+    let check_iat = get_flag("verify_iat", verify_signature)?;
+    let check_aud = get_flag("verify_aud", verify_signature)?;
+    let check_iss = get_flag("verify_iss", verify_signature)?;
+    let check_sub = get_flag("verify_sub", verify_signature)?;
+    let strict_aud = get_flag("strict_aud", false)?;
+
+    // Validation struct
     let alg_strs = algorithms.unwrap_or_else(|| vec!["HS256".to_string()]);
     let mut standard_algs = Vec::new();
     for s in &alg_strs {
         if let Ok(a) = Algorithm::from_str(s) { standard_algs.push(a); }
     }
-    
+
     let base_alg = standard_algs.first().cloned().unwrap_or(Algorithm::HS256);
     let mut validation = Validation::new(base_alg);
     if !standard_algs.is_empty() { validation.algorithms = standard_algs; } 
 
-    validation.leeway = 0; 
+    if leeway_arg > 0.0 {
+        validation.leeway = leeway_arg as u64;
+    } else if let Some(opts) = options {
+        if let Some(val) = opts.get_item("leeway")? {
+            validation.leeway = val.extract::<u64>()?;
+        }
+    } 
     
+    // We do manual validation in validate_claims_content
     validation.validate_exp = false; 
     validation.validate_nbf = false; 
     validation.validate_aud = false; 
-    
     validation.required_spec_claims.remove("exp"); 
     validation.aud = None;
     validation.iss = None;
 
-    let mut check_exp = true;
-    let mut check_nbf = true;
-    let mut check_iat = true;
-    let mut check_aud = true;
-    let mut check_iss = true;
-    let mut check_sub = true;
-    let mut strict_aud = false;
-
     if let Some(opts) = options {
-        macro_rules! update {
-            ($key:literal, $target:expr) => {
-                if let Some(val) = opts.get_item($key)? { $target = val.extract()?; }
-            };
-        }
-        update!("verify_exp", check_exp);
-        update!("verify_nbf", check_nbf);
-        update!("verify_iat", check_iat);
-        update!("verify_aud", check_aud);
-        update!("verify_iss", check_iss);
-        update!("verify_sub", check_sub);
-        update!("strict_aud", strict_aud);
-        update!("leeway", validation.leeway);
-
         if let Some(val) = opts.get_item("require")? {
             validation.required_spec_claims.extend(val.extract::<Vec<String>>()?);
         }
     }
-    
-    if strict_aud {
-        check_aud = true;
-    }
-    
-    Ok((validation, check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud))
+    let effective_check_aud = if strict_aud { true } else { check_aud };
+
+    Ok((validation, check_iat, check_exp, check_nbf, effective_check_aud, check_iss, check_sub, strict_aud))
 }
 
 
@@ -905,16 +910,18 @@ fn decode_complete_impl(
 
 
 #[pyfunction(name = "decode_complete")]
-#[pyo3(signature = (token, key=None, algorithms=None, options=None, audience=None, issuer=None, subject=None, verify=true, content=None, return_dict=true))]
-fn decode_complete<'py>(py: Python<'py>, token: &Bound<'py, PyAny>, key: Option<&Bound<'py, PyAny>>, 
-                        algorithms: Option<Vec<String>>, options: Option<&Bound<'py, PyDict>>, 
-                        audience: Option<&Bound<'py, PyAny>>, issuer: Option<&Bound<'py, PyAny>>, 
-                        subject: Option<String>, verify: bool, content: Option<&[u8]>, return_dict: bool,
-                    ) -> PyResult<Bound<'py, PyAny>> {
+#[pyo3(signature = (token, key=None, algorithms=None, options=None, audience=None, issuer=None, subject=None, verify=true, content=None, return_dict=true, leeway=0.0))]
+fn decode_complete<'py>(
+    py: Python<'py>, token: &Bound<'py, PyAny>, key: Option<&Bound<'py, PyAny>>, 
+    algorithms: Option<Vec<String>>, options: Option<&Bound<'py, PyDict>>, 
+    audience: Option<&Bound<'py, PyAny>>, issuer: Option<&Bound<'py, PyAny>>, 
+    subject: Option<String>, verify: Option<bool>, content: Option<&[u8]>, return_dict: bool, leeway: f64
+) -> PyResult<Bound<'py, PyAny>> {
+
     let token_str = extract_token_str(token)?;
     let alg_str = peek_algorithm(&token_str).unwrap_or_else(|_| "HS256".to_string());
     
-    let mut effective_verify = verify;
+    let mut effective_verify = verify.unwrap_or(true);
     let mut check_length = false; // Default false
     if let Some(opts) = options {
         if let Ok(Some(v)) = opts.get_item("verify_signature") { if let Ok(b) = v.extract::<bool>() { effective_verify = b; } }
@@ -954,7 +961,8 @@ fn decode_complete<'py>(py: Python<'py>, token: &Bound<'py, PyAny>, key: Option<
     }
 
     // [FIX] Renamed output variable to `check_iat` correctly
-    let (validation, check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud) = prepare_validation(algorithms.clone(), options)?;
+    let (validation, check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud)
+        = prepare_validation(algorithms.clone(), options, verify, leeway)?;
     
     let (expected_aud, expected_iss) = extract_aud_iss(audience, issuer)?;
 
@@ -988,8 +996,8 @@ fn encode(
     let time_claims = ["exp", "iat", "nbf"];
     let mut claims_map = Map::new();
 
+    // Claims prep
     for (k_py, v_py) in payload {
-
         let key_str = k_py.extract::<&str>()?; 
         if key_str == "iss" && !v_py.is_instance_of::<PyString>() { 
             return Err(PyTypeError::new_err("Issuer (iss) must be a string.")); 
@@ -1031,7 +1039,7 @@ fn encode(
 
 
 #[pyfunction(name = "decode")]
-#[pyo3(signature = (token, key=None, algorithms=None, options=None, audience=None, issuer=None, subject=None, verify=true, content=None, return_dict=true))]
+#[pyo3(signature = (token, key=None, algorithms=None, options=None, audience=None, issuer=None, subject=None, verify=true, content=None, return_dict=true, leeway=0.0))]
 fn decode<'py>(
     py: Python<'py>, 
     token: &Bound<'py, PyAny>, 
@@ -1041,13 +1049,14 @@ fn decode<'py>(
     audience: Option<&Bound<'py, PyAny>>, 
     issuer: Option<&Bound<'py, PyAny>>, 
     subject: Option<String>, 
-    verify: bool, 
+    verify: Option<bool>, 
     content: Option<&[u8]>,
     return_dict: bool,
+    leeway: f64,
 ) -> PyResult<Bound<'py, PyAny>> {
     
-    let complete = decode_complete(py, token, key, algorithms, options, 
-                    audience, issuer, subject, verify, content, return_dict)?;
+    let complete = decode_complete(
+        py, token, key, algorithms, options, audience, issuer, subject, verify, content, return_dict, leeway)?;
     
     if let Ok(dict) = complete.cast::<PyDict>() {
         if let Some(payload) = dict.get_item("payload")? {
@@ -1103,20 +1112,22 @@ fn pem_to_jwk(pem: &[u8]) -> PyResult<String> {
 
 
 #[pyfunction]
-#[pyo3(signature = (claims, options=None, audience=None, issuer=None, subject=None, leeway=0))]
+#[pyo3(signature = (claims, options=None, audience=None, issuer=None, subject=None, verify=true, leeway=0.0))]
 fn validate_claims(
     claims: &Bound<'_, PyAny>,
     options: Option<&Bound<'_, PyDict>>,
     audience: Option<&Bound<'_, PyAny>>,
     issuer: Option<&Bound<'_, PyAny>>,
     subject: Option<String>,
-    leeway: i64
+    verify: Option<bool>,
+    leeway: f64
 ) -> PyResult<()> {
     let claims_val: Value = depythonize(claims).map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    let (mut validation, _, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud) = prepare_validation(None, options)?;
+    let (mut validation, _, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud) 
+        = prepare_validation(None, options, verify, leeway)?;
     
-    if validation.leeway == 0 && leeway > 0 {
+    if validation.leeway == 0 && leeway > 0.0 {
         validation.leeway = leeway as u64; 
     }
 

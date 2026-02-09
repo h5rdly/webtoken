@@ -187,15 +187,11 @@ def decode_complete(
         if verify is False: 
             merged_options["verify_signature"] = False
     
-    if merged_options.get("verify_signature") is False:
-        for k in ["verify_exp", "verify_nbf", "verify_iat", "verify_aud", "verify_iss", "verify_sub", "verify_jti"]:
-            if k not in merged_options: 
-                merged_options[k] = False
-    
     verify_sig = merged_options.get("verify_signature", True)
     merged_options["leeway"] = int(leeway.total_seconds() if isinstance(leeway, datetime.timedelta) else leeway)
     
-    decoded_struct = _rust_decode_with_exception_fix(token, key, algorithms, merged_options, audience, issuer, subject, verify_sig, content)
+    decoded_struct = _rust_decode_with_exception_fix(
+        token, key, algorithms, merged_options, audience, issuer, subject, verify_sig, content)
     payload_data = decoded_struct["payload"]
     
     if isinstance(payload_data, dict):

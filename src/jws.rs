@@ -1,8 +1,7 @@
 use serde_json::{Value, Map};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
-use crate::{WebtokenError, algorithms::{perform_signature, perform_verification}};
-use crate::py_utils::decode_base64_permissive;
+use crate::{WebtokenError, algorithms, py_utils::decode_base64_permissive};
 
 
 pub fn prepare_jws_parts(header_map: &Map<String, Value>, payload_bytes: &[u8]
@@ -21,12 +20,7 @@ pub fn prepare_jws_parts(header_map: &Map<String, Value>, payload_bytes: &[u8]
 
 
 pub fn sign_output(
-    signing_input: &str,
-    header_b64: &str,
-    payload_b64: &str,
-    key: &[u8],
-    alg_name: &str,
-    detached: bool
+    signing_input: &str, header_b64: &str, payload_b64: &str, key: &[u8], alg_name: &str, detached: bool
 ) -> Result<String, WebtokenError> {
     
     if alg_name.eq_ignore_ascii_case("none") {
@@ -34,7 +28,7 @@ pub fn sign_output(
         return Ok(format!("{}.{}.", header_b64, payload_b64));
     }
 
-    let sig_bytes = perform_signature(signing_input.as_bytes(), key, alg_name)?;
+    let sig_bytes = algorithms::perform_signature(signing_input.as_bytes(), key, alg_name)?;
     let sig_b64 = URL_SAFE_NO_PAD.encode(sig_bytes);
 
     if detached {
@@ -46,6 +40,7 @@ pub fn sign_output(
 
 
 pub fn verify_bytes(token: &str, key: &[u8], alg_name: &str) -> Result<(Value, Vec<u8>), WebtokenError> {
+    
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 { return Err(WebtokenError::Generic("Invalid Token Format".into())); }
 
@@ -55,7 +50,7 @@ pub fn verify_bytes(token: &str, key: &[u8], alg_name: &str) -> Result<(Value, V
     let sig_bytes = decode_base64_permissive(signature_b64.as_bytes())
         .map_err(|_| WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid crypto padding".into() })?;
 
-    let valid = perform_verification(signing_input.as_bytes(), &sig_bytes, key, alg_name)?;
+    let valid = algorithms::perform_verification(signing_input.as_bytes(), &sig_bytes, key, alg_name)?;
     if !valid { 
         return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::InvalidSignature))); 
     }
