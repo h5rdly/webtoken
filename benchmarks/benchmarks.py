@@ -97,7 +97,7 @@ if __name__ == "__main__":
         )
 
     for benchmark in benchmarks:
-        benchmark(1000)
+        benchmark(int(sys.argv[1]) if len(sys.argv) > 1 else 100)
         pass
 
     # asyncio.run(async_benchmark())

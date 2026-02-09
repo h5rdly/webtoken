@@ -273,6 +273,7 @@ pub fn perform_signature(payload: &[u8], key: &[u8], alg_name: &str) -> Result<V
     Ok(sig_bytes)
 }
 
+
 pub fn perform_verification(payload: &[u8], signature: &[u8], key: &[u8], alg_name: &str) -> Result<bool, WebtokenError> {
     if let Some(ext_alg) = ExternalAlgorithm::from_str(alg_name) {
         return ext_alg.verify(payload, signature, key);

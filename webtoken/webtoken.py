@@ -1,35 +1,45 @@
 import os, sys, types, importlib.util, datetime, warnings, json
-from typing import Optional, List, Dict, Any, Union, Iterable
 
-# --- 1. Load Rust Core ---
+from collections.abc import Iterable
 
-rust_lib = None
-_rust_lib_name = 'webtoken'
-py_dir = __file__.rsplit('/', 1)[0]
 
-def _load_rust_module(path):
-    spec = importlib.util.spec_from_file_location(_rust_lib_name, path)
+## -- Moudle loading helpers 
+
+def _load_module(module_name: str, path: str):
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec and spec.loader:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return mod
     return None
 
-for file in os.listdir(py_dir):
-    if file.startswith(f'lib{_rust_lib_name}') and file.endswith((".so", ".pyd", ".dylib", 'dll')):
-        rust_lib = _load_rust_module(f'{py_dir}/{file}')
-        break
-else:
+
+def _load_rust_pip_or_dev(_rust_lib_name: str = 'webtoken', module_dev_path: str = None):
+
     _dev_path_linux = f'target/release/lib{_rust_lib_name}.so'
-    if os.path.exists(_dev_path_linux):
-        rust_lib = _load_rust_module(_dev_path_linux)
+    module_dev_path = module_dev_path or _dev_path_linux
 
-if rust_lib is None:
-    raise ImportError("Could not find Rust binary")
+    rust_lib = None
 
-# Capture Rust functions
-_rust_sign = rust_lib.sign
-_rust_encode = rust_lib.encode_fast
+    for file in os.listdir(__file__.rsplit('/', 1)[0]):
+        if file.startswith(f'lib{_rust_lib_name}') and file.endswith((".so", ".pyd", ".dylib", 'dll')):
+            rust_lib = _load_module(_rust_lib_name, f'{py_dir}/{file}')
+            break
+    else:
+        if os.path.exists(module_dev_path):
+            rust_lib = _load_module(_rust_lib_name, _dev_path_linux)
+
+    if rust_lib is None:
+        raise ImportError("Could not find Rust binary")
+
+    return rust_lib
+
+
+## -- Module hack pt. 1 - load lib, assign rust functions that we will be using
+
+rust_lib = _load_rust_pip_or_dev()
+
+_rust_encode = rust_lib.encode
 _rust_decode_complete = rust_lib.decode_complete
 _rust_get_header = rust_lib.get_unverified_header
 _rust_load_jwk = rust_lib.load_jwk
@@ -43,75 +53,23 @@ _rust_json_loads = rust_lib.json_loads
 _rust_json_dumps = rust_lib.json_dumps
 _rust_validate_claims = rust_lib.validate_claims
 
+_sentinel = object()
+
+class InsecureKeyLengthWarning(UserWarning): pass
+
+class RemovedInPyjwt3Warning(DeprecationWarning):  pass
+
 # Expose Types
 PyJWK = rust_lib.api_jwk.PyJWK
 InvalidKeyError = rust_lib.InvalidKeyError 
-
-# --- Constants & Helpers ---
-
-_sentinel = object()
-
-class InsecureKeyLengthWarning(UserWarning): 
-    pass
-
-class RemovedInPyjwt3Warning(DeprecationWarning): 
-    pass
-
 rust_lib.InsecureKeyLengthWarning = InsecureKeyLengthWarning
 rust_lib.RemovedInPyjwt3Warning = RemovedInPyjwt3Warning
 
 
-class PyJWTError(Exception):
-    pass
 
-# Inherit from both Rust's error (for catchability) and PyJWTError (for isinstance checks)
-class InvalidTokenError(rust_lib.InvalidTokenError, PyJWTError):
-    pass
+## --  JWT Helpers
 
-class DecodeError(rust_lib.DecodeError, InvalidTokenError):
-    pass
-
-class InvalidSignatureError(rust_lib.InvalidSignatureError, DecodeError):
-    pass
-
-class ExpiredSignatureError(rust_lib.ExpiredSignatureError, InvalidTokenError):
-    pass
-
-class InvalidAudienceError(rust_lib.InvalidAudienceError, InvalidTokenError):
-    pass
-
-class InvalidIssuerError(rust_lib.InvalidIssuerError, InvalidTokenError):
-    pass
-
-class ImmatureSignatureError(rust_lib.ImmatureSignatureError, InvalidTokenError):
-    pass
-
-class InvalidAlgorithmError(rust_lib.InvalidAlgorithmError, InvalidTokenError):
-    pass
-
-class MissingRequiredClaimError(rust_lib.InvalidTokenError):
-    ''' Wrapper to match PyJWT claim errors '''
-
-    def __init__(self, claim: str):
-        self.claim = claim
-        super().__init__(f'Token is missing the "{claim}" claim')
-
-
-exceptions_module = types.ModuleType("webtoken.exceptions")
-exceptions_module.PyJWTError = PyJWTError
-exceptions_module.InvalidTokenError = InvalidTokenError
-exceptions_module.DecodeError = DecodeError
-exceptions_module.InvalidSignatureError = InvalidSignatureError
-exceptions_module.ExpiredSignatureError = ExpiredSignatureError
-exceptions_module.InvalidAudienceError = InvalidAudienceError
-exceptions_module.InvalidIssuerError = InvalidIssuerError
-exceptions_module.ImmatureSignatureError = ImmatureSignatureError
-exceptions_module.InvalidAlgorithmError = InvalidAlgorithmError
-exceptions_module.MissingRequiredClaimError = MissingRequiredClaimError
-sys.modules["webtoken.exceptions"] = exceptions_module
-
-
-def _merge_options(default_options: Optional[Dict], options: Optional[Dict], kwargs: Dict) -> Dict:
+def _merge_options(default_options: dict | None, options: dict | None, kwargs: dict) -> dict:
 
     merged = default_options.copy() if default_options else {}
     if options: merged.update(options)
@@ -153,13 +111,11 @@ def _validate_iss(payload, issuer):
         raise rust_lib.InvalidIssuerError("Invalid issuer")
 
 
-# --- Internal Shared Logic ---
-
-def _decode_jws_struct(
-    token: Union[str, bytes], key: Union[str, bytes, PyJWK, None], algorithms: Optional[List[str]],
-    merged_options: Dict[str, Any], audience: Optional[Union[str, Iterable[str]]], issuer: Optional[str],
-    subject: Optional[str], verify_sig: bool, content: Optional[bytes], return_dict: bool = True
-) -> Dict[str, Any]:
+def _rust_decode_with_exception_fix(
+    token: str | bytes, key: str | bytes | PyJWK | None, algorithms: list[str] | None,
+    merged_options: dict[str, object], audience: str | Iterable[str] | None, issuer: str | None,
+    subject: str | None, verify_sig: bool, content: bytes | None, return_dict: bool = True
+) -> dict[str, object]:
 
     try:
         return _rust_decode_complete(
@@ -171,101 +127,75 @@ def _decode_jws_struct(
         raise e
 
 
-# -- Crypto helpers
-# _rust_generate_key_pair = rust_lib.generate_key_pair
 
-# def generate_key_pair(algorithm: str, key_size: int = None):
-#     return _rust_generate_key_pair(algorithm, key_size)
-
-# rust_lib.generate_key_pair = generate_key_pair
-
-# --- Core Global Functions 
+## -- JWT main logic
 
 def encode(
-    payload: Union[Dict[str, Any], bytes], 
-    key: Union[str, bytes, PyJWK], 
+    payload: dict[str, object] | bytes, 
+    key: str | bytes | PyJWK, 
     algorithm: str = "HS256", 
-    headers: Optional[Dict[str, Any]] = None, 
-    json_encoder: Optional[Any] = None, 
+    headers: dict[str, object] | None = None, 
+    json_encoder: object = None, 
     sort_headers: bool = True,
     check_length: bool = False
 ) -> str:
     
+    if isinstance(payload, dict) and json_encoder is None:
+        return  _rust_encode(payload, key, algorithm, headers, sort_headers, check_length)
+
     if not isinstance(payload, (dict, bytes)):
         raise TypeError("Expecting a dict or bytes object")
 
-    headers_to_pass = headers
     if headers and json_encoder:
         try:
             # Execute the user's encoder 
-            serialized_headers = json.dumps(headers, separators=(",", ":"), cls=json_encoder)
-            headers_to_pass = json.loads(serialized_headers)
+            headers = json.loads(json.dumps(headers, separators=(",", ":"), cls=json_encoder))
         except Exception as e:
-            # Match PyJWT behavior: raise TypeError on header serialization failure
             raise TypeError(f"Header serialization failed: {e}")
 
-
-    # standard path, no custom encoder
-    if isinstance(payload, dict) and json_encoder is None:
-        try:
-            res =  _rust_encode(payload, key, algorithm, headers_to_pass, sort_headers, check_length)
-            return res
-        # except TypeError:
-            # pass # Fallback to slow path for complex types
-        except Exception as e:
-            raise e
-
     # Custom encoders or raw bytes (PyJWS)
-    print(f'## starting slow lane')
-    json_payload = payload
     if isinstance(payload, dict):
-        payload_copy = payload.copy()
         for time_claim in ["exp", "iat", "nbf"]:
-            val = payload_copy.get(time_claim)
-            if isinstance(val, datetime.datetime):
-                payload_copy[time_claim] = int(val.replace(tzinfo=datetime.timezone.utc).timestamp())
+            if isinstance((claim := payload.get(time_claim)), datetime.datetime):
+                payload[time_claim] = int(claim.replace(tzinfo=datetime.timezone.utc).timestamp())
         
-        if "iss" in payload_copy and not isinstance(payload_copy["iss"], str):
-            raise TypeError("Issuer (iss) must be a string.")
-
-        json_payload = json.dumps(payload_copy, separators=(",", ":"), cls=json_encoder).encode("utf-8")
+        payload = json.dumps(payload, separators=(",", ":"), cls=json_encoder).encode("utf-8")
     
-    # Headers & Signing (Delegated to Rust)
-    return _rust_sign(json_payload, key, algorithm, headers_to_pass, sort_headers, check_length)
+    return rust_lib.sign(payload, key, algorithm, headers, sort_headers, check_length)
 
 
 def decode(
-    token: str, key: Union[str, bytes, PyJWK] = None, algorithms: Optional[List[str]] = None, 
-    options: Optional[Dict[str, Any]] = None, **kwargs
-) -> Dict[str, Any]:
+    token: str, key: str | bytes | PyJWK = None, algorithms: list[str] = None, 
+    options: dict[str, object] = None, **kwargs
+) -> dict[str, object]:
 
     decoded = decode_complete(token, key, algorithms, options, **kwargs)
     return decoded["payload"]
 
 
 def decode_complete(
-    token: str, key: Union[str, bytes, PyJWK] = None, algorithms: Optional[List[str]] = None,
-    options: Optional[Dict[str, Any]] = None, audience: Optional[Union[str, List[str]]] = None, 
-    issuer: Optional[str] = None, subject: Optional[str] = None, verify: Any = _sentinel, 
-    content: Optional[bytes] = None, leeway: Union[int, float, datetime.timedelta] = 0, **kwargs
-) -> Dict[str, Any]:
+    token: str, key: str | bytes | PyJWK = None, algorithms: list[str] | None = None,
+    options: dict[str, object] | None = None, audience: str | list[str] = None, 
+    issuer: str = None, subject: str = None, verify: object = _sentinel, 
+    content: bytes = None, leeway: int | float | datetime.timedelta = 0, **kwargs
+) -> dict[str, object]:
     
     merged_options = options.copy() if options else {}
+    # PyJWT compat warning
     if verify is not _sentinel:
         warnings.warn("The `verify` argument to `decode` does nothing in PyJWT 2.0 and newer.", DeprecationWarning, stacklevel=2)
-        if verify is False: merged_options["verify_signature"] = False
+        if verify is False: 
+            merged_options["verify_signature"] = False
     
     if merged_options.get("verify_signature") is False:
         for k in ["verify_exp", "verify_nbf", "verify_iat", "verify_aud", "verify_iss", "verify_sub", "verify_jti"]:
-            if k not in merged_options: merged_options[k] = False
+            if k not in merged_options: 
+                merged_options[k] = False
     
     verify_sig = merged_options.get("verify_signature", True)
+    merged_options["leeway"] = int(leeway.total_seconds() if isinstance(leeway, datetime.timedelta) else leeway)
     
-    if isinstance(leeway, datetime.timedelta): leeway = leeway.total_seconds()
-    leeway = int(leeway)
-    merged_options["leeway"] = leeway
-    
-    decoded_struct = _decode_jws_struct(token, key, algorithms, merged_options, audience, issuer, subject, verify_sig, content)
+    decoded_struct = _rust_decode_with_exception_fix(token, key, algorithms, merged_options, audience, issuer, subject, verify_sig, content)
     payload_data = decoded_struct["payload"]
     
     if isinstance(payload_data, dict):
@@ -295,25 +225,25 @@ def decode_complete(
 # --- Async Wrappers 
 
 async def encode_async(
-    payload: Dict[str, Any], 
-    key: Union[str, bytes], 
+    payload: dict[str, object], 
+    key: str | bytes, 
     algorithm: str = "HS256", 
-    headers: Optional[Dict[str, Any]] = None
+    headers: dict[str, object] | None = None
 ) -> str:
     return await asyncio.to_thread(encode, payload, key, algorithm, headers)
 
 
 async def decode_async(
     token: str,
-    key: Union[str, bytes],
-    algorithms: Optional[List[str]] = None,
-    options: Optional[Dict[str, Any]] = None,
-    audience: Optional[Union[str, List[str]]] = None,
-    issuer: Optional[str] = None,
-    subject: Optional[str] = None,
+    key: str | bytes,
+    algorithms: list[str] | None = None,
+    options: dict[str, object] | None = None,
+    audience: str | list[str] = None,
+    issuer: str = None,
+    subject: str = None,
     verify: bool = True,
-    content: Optional[bytes] = None,
-) -> Dict[str, Any]:
+    content: bytes = None,
+) -> dict[str, object]:
 
     return await asyncio.to_thread(
         decode, token, key, algorithms, options, audience, issuer, subject, verify, content
@@ -640,7 +570,7 @@ class RSAAlgorithm(Algorithm):
                 jwk_obj = key
             
             if jwk_obj:
-                # [FIX] Handle Dictionary (Standard JWK format)
+                # [FIX] Handle dictionary (Standard JWK format)
                 if isinstance(jwk_obj, dict):
                     if "n" in jwk_obj:
                         n_b64 = jwk_obj["n"]
@@ -835,7 +765,28 @@ def get_default_algorithms():
     }
 
     
-# ... (Wrapper Classes) ...
+## -- Wrapper Classes form PyJWT compat
+
+def _enforce_hmac_key_length(algorithm: str, key: str | bytes, raise_on_keylength = False):
+
+    if not algorithm.startswith("HS"):
+        return
+
+    key_bytes = key.encode("utf-8") if isinstance(key, str) else key
+    if not isinstance(key_bytes, bytes):
+        return
+        
+    min_len = {"HS256": 32, "HS384": 48, "HS512": 64}.get(algorithm, 0)
+    if (key_len := len(key_bytes)) >= min_len:
+        return
+        
+    msg = f"The specified key is {key_len} bytes long, which is below the minimum recommended length of {min_len} bytes."
+    if raise_on_keylength:
+        raise rust_lib.InvalidKeyError(msg)
+    else:
+        warnings.warn(msg, InsecureKeyLengthWarning)
+
+
 class PyJWS:
 
     header_typ = "JWT"
@@ -896,21 +847,20 @@ class PyJWS:
             raise NotImplementedError("Algorithm not supported")
         
         check_len = self.options.get("enforce_minimum_key_length", False)
-
-        # _validate_key_length(key, algorithm, self.options.get("enforce_minimum_key_length"))
+        _enforce_hmac_key_length(algorithm, key, raise_on_keylength=check_len)
 
         return encode(payload, key, algorithm, headers, json_encoder, sort_headers, check_length=check_len)
     
 
     def decode(
         self,
-        token: Union[str, bytes],
-        key: Union[str, bytes, PyJWK] = "",
-        algorithms: Optional[List[str]] = None,
-        options: Optional[Dict[str, Any]] = None,
-        detached_payload: Optional[bytes] = None,
-        **kwargs: Any,
-    ) -> Union[Dict[str, Any], bytes]:
+        token: str | bytes,
+        key: str | bytes | PyJWK = "",
+        algorithms: list[str] | None = None,
+        options: dict[str, object] | None = None,
+        detached_payload: bytes = None,
+        **kwargs: object,
+    ) -> dict[str, object] | bytes:
         
         decoded = self.decode_complete(token, key, algorithms, options, detached_payload=detached_payload, **kwargs)
         return decoded["payload"]
@@ -918,13 +868,13 @@ class PyJWS:
 
     def decode_complete(
         self,
-        token: Union[str, bytes],
-        key: Union[str, bytes, PyJWK] = "",
-        algorithms: Optional[List[str]] = None,
-        options: Optional[Dict[str, Any]] = None,
-        detached_payload: Optional[bytes] = None,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
+        token: str | bytes,
+        key: str | bytes | PyJWK = "",
+        algorithms: list[str] | None = None,
+        options: dict[str, object] | None = None,
+        detached_payload: bytes = None,
+        **kwargs: object,
+    ) -> dict[str, object]:
         
         pyjwt_allowed_kwargs = {"verify", "audience", "issuer", "subject", "leeway"}
         for k in kwargs:
@@ -941,7 +891,7 @@ class PyJWS:
 
         verify_sig = merged_ops.get("verify_signature", True)
         
-        return _decode_jws_struct(
+        return _rust_decode_with_exception_fix(
             token, key, algorithms, merged_ops, None, None, None, verify_sig, detached_payload, return_dict=False)
     
 
@@ -954,18 +904,7 @@ class PyJWT:
     
 
     def encode(self, payload, key, algorithm="HS256", headers=None, json_encoder=None, sort_headers=True):
-        
-        # if algorithm.startswith("HS"):
-        #     key_bytes = key.encode("utf-8") if isinstance(key, str) else key
-        #     if isinstance(key_bytes, bytes):
-        #         min_len = {"HS256": 32, "HS384": 48, "HS512": 64}.get(algorithm, 0)
-        #         if len(key_bytes) < min_len:
-        #             msg = f"The specified key is {len(key_bytes)} bytes long, which is below the minimum recommended length of {min_len} bytes."
-        #             if self.options.get("enforce_minimum_key_length"):
-        #                 raise rust_lib.InvalidKeyError(msg)
-        #             else:
-        #                 warnings.warn(msg, InsecureKeyLengthWarning)
-
+        _enforce_hmac_key_length(algorithm, key, raise_on_keylength=True)
         return encode(payload, key, algorithm, headers, json_encoder, sort_headers)
     
 
@@ -979,7 +918,7 @@ class PyJWT:
         merged = _merge_options(self.options, options, kwargs)
 
         if hasattr(self, "_decode_payload") and getattr(self._decode_payload, "__func__", None) is not PyJWT._decode_payload:
-             decoded_struct = _decode_jws_struct(
+             decoded_struct = _rust_decode_with_exception_fix(
                 token, key, algorithms, merged, None, None, None, merged.get("verify_signature", True), 
                 None, return_dict=True)
 
@@ -996,12 +935,16 @@ class PyJWT:
     
 
     def _decode_payload(self, decoded):
+
         try:
             val = decoded["payload"]
             if isinstance(val, bytes): val = val.decode('utf-8')
             return _rust_json_loads(val)
         except Exception as e: raise rust_lib.DecodeError(f"Invalid payload string: {e}")
 
+
+
+## -- Epilogue - module hack cont. - reassign our python variants back to the main module
 
 rust_lib.encode = encode
 rust_lib.decode = decode

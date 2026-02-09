@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::str::{FromStr, from_utf8};
 use std::collections::{HashSet, HashMap};
 use std::sync::{OnceLock, RwLock};
 
@@ -302,7 +302,7 @@ fn sort_map(map: &mut Map<String, Value>) {
 
 
 fn looks_like_public_key(key: &[u8]) -> bool {
-    if let Ok(s) = std::str::from_utf8(key) {
+    if let Ok(s) = from_utf8(key) {
         let s = s.trim();
         s.starts_with("-----BEGIN") 
         || s.starts_with("ssh-") 
@@ -341,7 +341,7 @@ fn peek_algorithm(token: &str) -> PyResult<String> {
 
 fn extract_token_str(token: &Bound<'_, PyAny>) -> PyResult<String> {
     if let Ok(s) = token.extract::<String>() { Ok(s) }
-    else if let Ok(b) = token.extract::<&[u8]>() { std::str::from_utf8(b).map(|s| s.to_string())
+    else if let Ok(b) = token.extract::<&[u8]>() { from_utf8(b).map(|s| s.to_string())
         .map_err(|_| DecodeError::new_err("Invalid token type")) }
     else { Err(DecodeError::new_err("Invalid token type. Token must be a <class 'bytes'>")) }
 }
@@ -350,28 +350,32 @@ fn extract_token_str(token: &Bound<'_, PyAny>) -> PyResult<String> {
 fn get_key_bytes(key: &Bound<'_, PyAny>, alg_name: &str, is_signing: bool, check_length: bool) -> PyResult<Vec<u8>> {
 
     if let Ok(jwk) = key.extract::<PyJWK>() { return jwk.to_key_bytes(!is_signing); }
-    
     if alg_name.eq_ignore_ascii_case("none") { return Ok(Vec::new()); }
 
-    let mut key_bytes = if let Ok(s) = key.extract::<String>() { s.into_bytes() }
-    else if let Ok(b) = key.extract::<Vec<u8>>() { b }
-    else { return Err(PyTypeError::new_err("Key must be string or bytes")); };
+    let key_slice = if let Ok(s) = key.cast::<PyString>() {
+    s.to_str()?.as_bytes()} else if let Ok(b) = key.cast::<PyBytes>() {b.as_bytes()} else {
+        return Err(PyTypeError::new_err("Key must be string or bytes"));
+    };
 
-    if let Ok(s) = std::str::from_utf8(&key_bytes) {
+    if let Ok(s) = from_utf8(key_slice) {
         if s.starts_with("ssh-") || s.starts_with("ecdsa-") {
-            if let Ok(pem) = crate::crypto::ssh_to_pem(&key_bytes) { key_bytes = pem; }
+            if let Ok(pem) = crypto::ssh_to_pem(key_slice) {
+                return Ok(pem);
+            }
         }
     }
     
-    if ExternalAlgorithm::from_str(alg_name).is_some() { return Ok(key_bytes); }
+    if ExternalAlgorithm::from_str(alg_name).is_some() {
+        return Ok(key_slice.to_vec());
+    }
+
     let alg = Algorithm::from_str(alg_name).map_err(|_| PyNotImplementedError::new_err(format!("Algorithm '{}' not supported", alg_name)))?;
     
     if is_hmac(alg) {
-        if looks_like_public_key(&key_bytes) { 
+        if looks_like_public_key(key_slice) { 
             return Err(InvalidKeyError::new_err("The specified key is an asymmetric key... should not be used as an HMAC secret.")); 
         }
-        
-        // [NEW] Validation Logic
+
         if check_length {
             let min_len = match alg {
                 Algorithm::HS256 => 32,
@@ -379,15 +383,17 @@ fn get_key_bytes(key: &Bound<'_, PyAny>, alg_name: &str, is_signing: bool, check
                 Algorithm::HS512 => 64,
                 _ => 0,
             };
-            if key_bytes.len() < min_len {
+            if key_slice.len() < min_len {
                 return Err(InvalidKeyError::new_err(format!(
                     "The specified key is {} bytes long, which is below the minimum recommended length of {} bytes.",
-                    key_bytes.len(), min_len
+                    key_slice.len(), min_len
                 )));
             }
         }
     }
-    Ok(key_bytes)
+
+    Ok(key_slice.to_vec())
+
 }
 
 
@@ -970,7 +976,7 @@ fn decode_complete<'py>(py: Python<'py>, token: &Bound<'py, PyAny>, key: Option<
 
 #[pyfunction]
 #[pyo3(signature = (payload, key, algorithm="HS256", headers=None, sort_headers=true, check_length=false))] // [FIX] Added arg
-fn encode_fast(
+fn encode(
     payload: &Bound<'_, PyDict>, 
     key: &Bound<'_, PyAny>, 
     algorithm: &str, 
@@ -1026,7 +1032,7 @@ fn encode_fast(
 
 #[pyfunction(name = "decode")]
 #[pyo3(signature = (token, key=None, algorithms=None, options=None, audience=None, issuer=None, subject=None, verify=true, content=None, return_dict=true))]
-fn py_decode<'py>(
+fn decode<'py>(
     py: Python<'py>, 
     token: &Bound<'py, PyAny>, 
     key: Option<&Bound<'py, PyAny>>, 
@@ -1174,8 +1180,8 @@ fn webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sign, m)?)?;
     m.add_function(wrap_pyfunction!(verify, m)?)?;
     m.add_function(wrap_pyfunction!(validate_key_properties, m)?)?;
-    m.add_function(wrap_pyfunction!(encode_fast, m)?)?; 
-    m.add_function(wrap_pyfunction!(py_decode, m)?)?;
+    m.add_function(wrap_pyfunction!(encode, m)?)?; 
+    m.add_function(wrap_pyfunction!(decode, m)?)?;
     m.add_function(wrap_pyfunction!(decode_complete, m)?)?;
     m.add_function(wrap_pyfunction!(get_unverified_header, m)?)?;
     m.add_function(wrap_pyfunction!(load_key_from_pem, m)?)?;
