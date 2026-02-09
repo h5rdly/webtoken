@@ -23,9 +23,10 @@ mod jws;
 mod py_utils;
 pub mod pyjwt_jwk_api;
 
-use crate::algorithms::{ExternalAlgorithm, perform_signature, perform_verification};
-use crate::pyjwt_jwk_api::{PyJWK, PyJWKSet, perform_signature_jwk, perform_verification_jwk};
-use crate::py_utils::decode_base64_permissive;
+use algorithms::{ExternalAlgorithm, perform_signature, perform_verification};
+use py_utils::decode_base64_permissive;
+use pyjwt_jwk_api::{PyJWK, PyJWKSet, perform_signature_jwk, perform_verification_jwk, 
+    validate_key_properties, check_rsa_key_length};
 
 
 #[macro_export]
@@ -225,44 +226,44 @@ fn load_jwk_set(data: &Bound<'_, PyAny>) -> PyResult<PyJWKSet> {
 }
 
 
-fn map_curve_name_for_error(name: &str) -> &str {
-    match name {
-        "P-256" => "secp256r1",
-        "P-384" => "secp384r1",
-        "P-521" => "secp521r1",
-        "P-192" => "secp192r1",
-        _ => name
-    }
-}
+// fn map_curve_name_for_error(name: &str) -> &str {
+//     match name {
+//         "P-256" => "secp256r1",
+//         "P-384" => "secp384r1",
+//         "P-521" => "secp521r1",
+//         "P-192" => "secp192r1",
+//         _ => name
+//     }
+// }
 
-#[pyfunction]
-#[pyo3(signature = (key, expected_kty, expected_crv=None))]
-fn validate_key_properties(key: &PyJWK, expected_kty: &str, expected_crv: Option<&str>) -> PyResult<()> {
-    // 1. Validate Key Type (kty)
-    let kty = key.inner.get("kty").and_then(|v| v.as_str()).unwrap_or("");
-    if kty != expected_kty {
-        // e.g. "Invalid key type: RSA. Expected EC."
-        return Err(InvalidKeyError::new_err(format!("Invalid key type: {}. Expected {}.", kty, expected_kty)));
-    }
+// #[pyfunction]
+// #[pyo3(signature = (key, expected_kty, expected_crv=None))]
+// fn validate_key_properties(key: &PyJWK, expected_kty: &str, expected_crv: Option<&str>) -> PyResult<()> {
+//     // 1. Validate Key Type (kty)
+//     let kty = key.inner.get("kty").and_then(|v| v.as_str()).unwrap_or("");
+//     if kty != expected_kty {
+//         // e.g. "Invalid key type: RSA. Expected EC."
+//         return Err(InvalidKeyError::new_err(format!("Invalid key type: {}. Expected {}.", kty, expected_kty)));
+//     }
     
-    // 2. Validate Curve (crv) if expected
-    if let Some(req_crv) = expected_crv {
-        let crv = key.inner.get("crv").and_then(|v| v.as_str())
-            .ok_or_else(|| InvalidKeyError::new_err(format!("{} key missing 'crv'", expected_kty)))?;
+//     // 2. Validate Curve (crv) if expected
+//     if let Some(req_crv) = expected_crv {
+//         let crv = key.inner.get("crv").and_then(|v| v.as_str())
+//             .ok_or_else(|| InvalidKeyError::new_err(format!("{} key missing 'crv'", expected_kty)))?;
         
-        if crv != req_crv {
-            // Use the mapping helper to generate the specific error message PyJWT tests expect
-            let mapped_actual = map_curve_name_for_error(crv);
-            let mapped_expected = map_curve_name_for_error(req_crv);
+//         if crv != req_crv {
+//             // Use the mapping helper to generate the specific error message PyJWT tests expect
+//             let mapped_actual = map_curve_name_for_error(crv);
+//             let mapped_expected = map_curve_name_for_error(req_crv);
             
-            return Err(InvalidKeyError::new_err(format!(
-                "Key curve {} does not match algorithm curve {}.", 
-                mapped_actual, mapped_expected
-            )));
-        }
-    }
-    Ok(())
-}
+//             return Err(InvalidKeyError::new_err(format!(
+//                 "Key curve {} does not match algorithm curve {}.", 
+//                 mapped_actual, mapped_expected
+//             )));
+//         }
+//     }
+//     Ok(())
+// }
 
 #[pyfunction]
 pub fn register_algorithm(name: &str, provider: Py<PyAny>) {
@@ -1214,6 +1215,7 @@ fn webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_jwk, m)?)?;
     m.add_function(wrap_pyfunction!(load_jwk_set, m)?)?; 
     m.add_function(wrap_pyfunction!(pem_to_jwk, m)?)?;
+    m.add_function(wrap_pyfunction!(check_rsa_key_length, m)?)?;
 
     crypto::export_functions(m)?; // Unified crypto export
     py_utils::export_py_utils(m)?;

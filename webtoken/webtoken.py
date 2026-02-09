@@ -130,8 +130,6 @@ def _rust_decode_with_exception_fix(
         raise e
 
 
-
-
 ## -- JWT main logic
 
 def encode(
@@ -397,7 +395,6 @@ class PyJWS:
             token, key, algorithms, merged_ops, None, None, None, verify_sig, detached_payload, return_dict=False)
     
 
-
 # -- Curves shim  
 
 class Curve:
@@ -416,26 +413,55 @@ class SECP256K1(Curve):
     name = "secp256k1"
 
 
-# --- Algorithms Shim ---
+# -- Algorithms Shim 
 
 class Algorithm:
-
+    
     def sign(self, msg, key): raise NotImplementedError
     def verify(self, msg, key, sig): raise NotImplementedError
-    def check_key_length(self, key): return None
     def check_crypto_key_type(self, key): pass
 
-    def prepare_key(self, key): 
-        if key is None: raise TypeError("Key cannot be None")
+    def check_key_length(self, key): 
+        pass
+        
+    def prepare_key(self, key):
+
+        if key is None: 
+            raise TypeError("Key cannot be None")
         return key
+
 
     def compute_hash_digest(self, bytes_data):
         alg = getattr(self, "alg", "SHA256")
         return bytes(_rust_digest(alg, bytes_data))
 
 
+    def _prepare_asymmetric_key(self, key):
+        """
+        Shared logic for RSA/EC/OKP:
+        1. If already PyJWK, return it.
+        2. If bytes/str, try to load as PEM -> PyJWK.
+        3. If fails, raise error (strict).
+        """
+
+        if isinstance(key, PyJWK):
+            return key
+        
+        if isinstance(key, (str, bytes)):
+            try:
+                key_bytes = key.encode("utf-8") if isinstance(key, str) else key
+                # Fast Rust PEM parsing
+                json_str = _rust_pem_to_jwk(key_bytes)
+                return _rust_load_jwk(json_str)
+            except Exception:
+                raise rust_lib.InvalidKeyError("Could not parse the provided public key.")
+        
+        raise TypeError("Key must be PyJWK, bytes, or string")
+
+
     def _load_pem_to_pyjwk(self, key):
         """Shared helper to safely load PEM bytes/str into a PyJWK."""
+
         if isinstance(key, (str, bytes)):
             try:
                 key_bytes = key.encode("utf-8") if isinstance(key, str) else key
@@ -447,30 +473,13 @@ class Algorithm:
         return None
 
 
-    def validate_jwk(self, jwk, kty=None, crv=None):
-        """Consolidated validation logic."""
-        # Convert dict to PyJWK if needed, or validate dict fields directly
-        # This assumes jwk is a dict or PyJWK object wrapper
-        data = jwk if isinstance(jwk, dict) else jwk.as_dict()
-        
-        if kty and data.get("kty") != kty:
-            raise rust_lib.InvalidKeyError(f"Invalid key type: {data.get('kty')}. Expected {kty}.")
-        
-        if crv:
-            if "crv" not in data:
-                raise rust_lib.InvalidKeyError(f"Key must be {kty} and have 'crv'")
-            if data["crv"] != crv:
-                 # Check for mapped names (P-256 vs secp256r1)
-                 # ... (Shared mapping logic can go here)
-                 raise rust_lib.InvalidKeyError(f"Unsupported curve: {data['crv']}")
-        return data
-
-
     @staticmethod
     def from_jwk(jwk):
-        try: return _rust_load_jwk(_rust_json_dumps(jwk) if isinstance(jwk, dict) else jwk)
+        try: 
+            return _rust_load_jwk(_rust_json_dumps(jwk) if isinstance(jwk, dict) else jwk)
         except Exception as e: 
-             if "Key type" in str(e): raise rust_lib.InvalidKeyError("Key type (kty) not found") 
+             if "Key type" in str(e): 
+                raise rust_lib.InvalidKeyError("Key type (kty) not found") 
              raise rust_lib.InvalidKeyError("Invalid key")
              
     
@@ -507,7 +516,6 @@ class Algorithm:
         return _rust_json_dumps(jwk_data)
 
 
-
 class NoneAlgorithm(Algorithm):
 
     def prepare_key(self, key): 
@@ -533,72 +541,63 @@ class HMACAlgorithm(Algorithm):
         }.get(self.hash_alg, "HS256")
     
     
-    def sign(self, msg, key): return bytes(_rust_raw_sign(msg, key, self.alg))
+    def sign(self, msg, key): 
+        return bytes(_rust_raw_sign(msg, key, self.alg))
 
-    def verify(self, msg, key, sig): return _rust_raw_verify(msg, bytes(sig), key, self.alg)
+    def verify(self, msg, key, sig): 
+        return _rust_raw_verify(msg, bytes(sig), key, self.alg)
     
 
+    def check_key_length(self, key):
+
+        if isinstance(key, (str, bytes)):
+            key_bytes = key.encode("utf-8") if isinstance(key, str) else key
+            
+            req = {"HS256": 32, "HS384": 48, "HS512": 64}.get(self.alg, 0)
+            if len(key_bytes) < req: 
+                return f"The specified key is {len(key_bytes)} bytes long, which is below the minimum recommended length of {req} bytes."
+
+
+    @staticmethod
+    def from_jwk(jwk):
+        key = Algorithm.from_jwk(jwk)
+        if key.key_type != "oct": 
+            raise rust_lib.InvalidKeyError("Not an HMAC key")
+        return key
+
+
+    def to_jwk(self, key, as_dict=False):
+
+        if isinstance(key, (dict, PyJWK)): 
+            return super().to_jwk(key, as_dict)
+
+        if isinstance(key, (str, bytes)):
+            key_bytes = key.encode("utf-8") if isinstance(key, str) else key
+            data = {"kty": "oct", "k": _rust_b64_encode(key_bytes).decode("utf-8")}
+            return data if as_dict else _rust_json_dumps(data)
+            
+        raise rust_lib.InvalidKeyError("Invalid key type for HMAC JWK generation")
+
+
     def prepare_key(self, key):
-        if key is None: raise TypeError("Key cannot be None")
-        if not isinstance(key, (str, bytes, PyJWK)): raise TypeError("Expected a string value")
+
+        if key is None: 
+            raise TypeError("Key cannot be None")
+
+        if not isinstance(key, (str, bytes, PyJWK)): 
+            raise TypeError("Expected a string value")
 
         if isinstance(key, (str, bytes)):
             try:
                 key_text = key.decode("utf-8") if isinstance(key, bytes) else key
-                
-                if ("-----BEGIN PUBLIC KEY-----" in key_text or 
-                    "-----BEGIN RSA PUBLIC KEY-----" in key_text or 
-                    "-----BEGIN CERTIFICATE-----" in key_text or 
-                    "ssh-rsa" in key_text):
-                    raise rust_lib.InvalidKeyError(
-                        "The specified key is an asymmetric key or x509 certificate and should not be used as an HMAC secret."
-                    )
+                if "-----BEGIN" in key_text or "ssh-" in key_text:
+                    raise rust_lib.InvalidKeyError("The specified key is an asymmetric key...")
             except UnicodeDecodeError:
                 # If it's not valid UTF-8, it's likely a binary secret, which is allowed.
                 pass
 
         return key
 
-
-    def check_key_length(self, key):
-        if isinstance(key, (str, bytes)):
-
-            key_bytes = key.encode("utf-8") if isinstance(key, str) else key
-            # [FIX] Use self.alg (which is now HS256/etc) for lookup
-            req = {"HS256": 32, "HS384": 48, "HS512": 64}.get(self.alg, 0)
-            if len(key_bytes) < req: 
-                return f"The specified key is {len(key_bytes)} bytes long, which is below the minimum recommended length of {req} bytes."
-        return None
-    
-
-    @staticmethod
-    def from_jwk(jwk):
-        key = Algorithm.from_jwk(jwk)
-        if key.key_type != "oct": raise rust_lib.InvalidKeyError("Not an HMAC key")
-        return key
-
-
-    def to_jwk(self, key, as_dict=False):
-        
-        if isinstance(key, dict):
-             raise rust_lib.InvalidKeyError("Invalid key: dict is not a supported key type for to_jwk")
-
-        # Handle PyJWK
-        if isinstance(key, PyJWK):
-            data = key.as_dict()
-            if data.get("kty") != "oct":
-                 raise rust_lib.InvalidKeyError("Invalid key type for HMAC")
-            if as_dict: return data
-            return _rust_json_dumps(data)
-
-        # Handle raw bytes/string
-        if isinstance(key, (str, bytes)):
-            key_bytes = key.encode("utf-8") if isinstance(key, str) else key
-            data = {"kty": "oct", "k": _rust_b64_encode(key_bytes).decode("utf-8")}
-            return data if as_dict else _rust_json_dumps(data)
-            
-        # Fallback to base implementation (unlikely to reach here for HMAC)
-        return super().to_jwk(key, as_dict)
 
 
 class RSAAlgorithm(Algorithm):
@@ -618,131 +617,41 @@ class RSAAlgorithm(Algorithm):
     def sign(self, msg, key): 
         return bytes(_rust_raw_sign(msg, key, self.alg))
 
-
     def verify(self, msg, key, sig): 
         return _rust_raw_verify(msg, bytes(sig), key, self.alg)
     
+    def check_key_length(self, key):
+        return rust_lib.check_rsa_key_length(key)
+
 
     def to_jwk(self, key, as_dict=False):
-        
-        if isinstance(key, PyJWK):
-            jwk_dict = key.as_dict()
-        else:
-            jwk_dict = super().to_jwk(key, as_dict=True)
+
+        jwk_dict = key.as_dict() if isinstance(key, PyJWK) else super().to_jwk(key, as_dict=True)
 
         if "key_ops" not in jwk_dict:
-            # RSA Private keys have 'd', 'p', 'q', etc.
-            if "d" in jwk_dict:
-                jwk_dict["key_ops"] = ["sign"]
-            else:
-                jwk_dict["key_ops"] = ["verify"]
+            jwk_dict["key_ops"] = ["sign"] if "d" in jwk_dict else ["verify"]
 
-        if as_dict:
-            return jwk_dict
-        return _rust_json_dumps(jwk_dict)
+        return jwk_dict if as_dict else _rust_json_dumps(jwk_dict)
 
 
     @staticmethod
     def from_jwk(jwk):
-        try:
-            d = jwk if isinstance(jwk, dict) else _rust_json_loads(jwk)
-        except (ValueError, TypeError):
-            raise rust_lib.InvalidKeyError("Invalid JWK")
 
-        if d.get("kty") != "RSA": 
+        key = super(RSAAlgorithm, RSAAlgorithm).from_jwk(jwk)
+        if key.key_type != "RSA":
             raise rust_lib.InvalidKeyError("Key must be RSA")
-        
-        if "n" not in d or "e" not in d:
-            raise rust_lib.InvalidKeyError("Missing RSA public key components")
-
-        if "oth" in d:
-            raise rust_lib.InvalidKeyError("RSA keys with 'oth' (other primes) are not supported")
             
-        if "d" in d:
-            crt_params = ["p", "q", "dp", "dq", "qi"]
-            # Enforce All or Nothing for CRT parameters
-            if 0 < sum(p in d for p in crt_params) < len(crt_params):
-                missing = [p for p in crt_params if p not in d]
-                raise rust_lib.InvalidKeyError(f"Missing RSA private key component: {missing}")
-        
-        return super(RSAAlgorithm, RSAAlgorithm).from_jwk(jwk)
+        key.validate_rsa_consistency()
+
+        return key
     
     
     def prepare_key(self, key):
 
-        if key is None:
-            raise TypeError("Key cannot be None")
-        
-        jwk = None
-        if isinstance(key, (str, bytes)):
-            try:
-                key_bytes = key.encode("utf-8") if isinstance(key, str) else key
-                jwk_json = _rust_pem_to_jwk(key_bytes)
-                jwk = _rust_load_jwk(jwk_json)
-            except Exception:
-                pass
-        
-        if jwk:
-            if jwk.key_type != "RSA":
-                 raise rust_lib.InvalidKeyError(f"Invalid key type: {jwk.key_type}. Expected RSA.")
-            return jwk
-        
-        # If we failed to parse as PEM, throw error for RSA (unlike generic Algorithm which might allow raw bytes)
-        if isinstance(key, (str, bytes)):
-             raise rust_lib.InvalidKeyError("Could not parse the provided public key.")
+        if (jwk := self._prepare_asymmetric_key(key)).key_type != "RSA":
+             raise rust_lib.InvalidKeyError(f"Invalid key type: {jwk.key_type}. Expected RSA.")
 
-        return key
-        
-
-    def check_key_length(self, key):
-        try:
-            # 1. Handle "cryptography" style keys (objects with key_size)
-            if hasattr(key, "key_size"):
-                bit_len = key.key_size
-                if bit_len < 2048:
-                    return f"The specified key is {bit_len} bits, which is below the minimum recommended length of 2048 bits."
-                return None
-
-            jwk_obj = None
-            if isinstance(key, (str, bytes)):
-                key_bytes = key.encode("utf-8") if isinstance(key, str) else key
-                try:
-                    # Returns a dict
-                    jwk_obj = rust_lib.load_key_from_pem(key_bytes)
-                except Exception:
-                    pass
-            elif isinstance(key, PyJWK):
-                jwk_obj = key
-            elif isinstance(key, dict):
-                jwk_obj = key
-            
-            if jwk_obj:
-                # [FIX] Handle dictionary (Standard JWK format)
-                if isinstance(jwk_obj, dict):
-                    if "n" in jwk_obj:
-                        n_b64 = jwk_obj["n"]
-                        try:
-                            # Decode Base64URL to bytes
-                            n_bytes = _rust_b64_decode(n_b64)
-                            # Convert to integer to get accurate bit length
-                            bit_len = int.from_bytes(n_bytes, byteorder='big').bit_length()
-                            
-                            if bit_len < 2048:
-                                return f"The specified key is {bit_len} bits, which is below the minimum recommended length of 2048 bits."
-                        except Exception:
-                            pass
-
-                # Handle PyJWK (if applicable in future) or objects with public_numbers
-                elif hasattr(jwk_obj, 'public_numbers'):
-                    pub_nums = jwk_obj.public_numbers()
-                    if pub_nums and hasattr(pub_nums, 'n'):
-                        bit_len = pub_nums.n.bit_length()
-                        if bit_len < 2048:
-                            return f"The specified key is {bit_len} bits, which is below the minimum recommended length of 2048 bits."
-
-        except Exception:
-            pass
-        return None
+        return jwk
 
 
 class RSAPSSAlgorithm(RSAAlgorithm):
@@ -771,61 +680,34 @@ class ECAlgorithm(Algorithm):
         }.get(self.hash_alg, "ES256")
         self.expected_curve = curve
     
+
     def sign(self, msg, key): 
         return bytes(_rust_raw_sign(msg, key, self.alg))
+
 
     def verify(self, msg, key, sig): 
         return _rust_raw_verify(msg, bytes(sig), key, self.alg)
 
 
-
-        
     @staticmethod
     def from_jwk(jwk):
-        try:
-            d = jwk if isinstance(jwk, dict) else _rust_json_loads(jwk)
-        except ValueError:
-            raise rust_lib.InvalidKeyError("Invalid Key: Invalid JSON")
 
-        if d.get("kty") != "EC": raise rust_lib.InvalidKeyError("Key must be EC")
-        if "crv" not in d: raise rust_lib.InvalidKeyError("Key must be EC and have 'crv'")
-        
-        return super(ECAlgorithm, ECAlgorithm).from_jwk(jwk)
+        key = Algorithm.from_jwk(jwk)
+        rust_lib.validate_key_properties(key, "EC", None)
+
+        return key
 
 
     def prepare_key(self, key):
 
-        if key is None:
-            raise TypeError("Key cannot be None")
-            
-        jwk = None
-        if isinstance(key, PyJWK):
-            jwk = key
-        elif isinstance(key, (str, bytes)):
-            try:
-                # Attempt to load PEM/Byte key
-                key_bytes = key.encode("utf-8") if isinstance(key, str) else key
-                jwk_json = _rust_pem_to_jwk(key_bytes)
-                jwk = _rust_load_jwk(jwk_json)
-            except Exception:
-                # If loading fails (not a valid key format), we fall through 
-                # and return the original key (for raw byte keys/HMAC cases).
-                pass
+        jwk = self._prepare_asymmetric_key(key)
+        
+        expected_name = None
+        if self.expected_curve:
+            expected_name = getattr(self.expected_curve, "name", None) or str(self.expected_curve)
 
-        if jwk:
-            expected_name = None
-            if self.expected_curve:
-                expected_name = getattr(self.expected_curve, "name", None)
-                if not expected_name:
-                    expected_name = str(self.expected_curve)
-
-            # [FIX] Offload validation to Rust (Performance + Consistency)
-            # This replaces the dictionary lookup, try/catch, and manual string mapping logic
-            rust_lib.validate_key_properties(jwk, "EC", expected_name)
-            
-            return jwk
-
-        return key
+        rust_lib.validate_key_properties(jwk, "EC", expected_name)
+        return jwk
 
 
 class OKPAlgorithm(Algorithm):
@@ -833,75 +715,39 @@ class OKPAlgorithm(Algorithm):
     def sign(self, msg, key): return bytes(_rust_raw_sign(msg, key, "EdDSA"))
     def verify(self, msg, key, sig): return _rust_raw_verify(msg, bytes(sig), key, "EdDSA")
 
-    
+
     @staticmethod
     def from_jwk(jwk):
-        try:
-            d = jwk if isinstance(jwk, dict) else _rust_json_loads(jwk)
-        except (ValueError, TypeError):
-            # Catch JSON decode errors (ValueError) and type errors (e.g. int passed)
-            raise rust_lib.InvalidKeyError("Invalid JWK")
 
-        if d.get("kty") != "OKP": 
-            raise rust_lib.InvalidKeyError("Not an Octet Key Pair")
-        
-        # [FIX] Added validation for 'crv' and 'x' (public key component)
-        # The test checks for invalid crv ("P-256", "Ed448") and invalid 'x'
-        if d.get("crv") != "Ed25519":
-             raise rust_lib.InvalidKeyError(f"Unsupported curve: {d.get('crv')}")
-        
-        if "x" not in d:
-             raise rust_lib.InvalidKeyError("Missing x component")
-
-        # Validate base64 of 'x' and 'd' if present
-        try:
-             _rust_b64_decode(d["x"])
-             if "d" in d:
-                 _rust_b64_decode(d["d"])
-        except Exception:
-             raise rust_lib.InvalidKeyError("Invalid base64 encoding")
-
-        return super(OKPAlgorithm, OKPAlgorithm).from_jwk(jwk)
-
-    
-    def prepare_key(self, key):
-
-        if key is None:
-             raise rust_lib.InvalidKeyError("Key cannot be None")
-        
-        jwk = None
-        
-        # 1. Normalize input to PyJWK
-        if isinstance(key, PyJWK):
-            jwk = key
-        elif isinstance(key, (str, bytes)):
-            try:
-                key_bytes = key.encode("utf-8") if isinstance(key, str) else key
-                # Attempt to parse as PEM using native Rust function
-                jwk = rust_lib.load_key_from_pem(key_bytes)
-            except Exception:
-                # If it fails to parse as a valid PEM key, reject it
-                raise rust_lib.InvalidKeyError("Invalid key: failed to parse PEM")
-
-        # 2. Validate Properties using Rust Helper
-        if jwk:
-            # Checks kty="OKP" and crv="Ed25519"
-            # This replaces the manual dictionary lookups and inconsistent error messages
-            rust_lib.validate_key_properties(jwk, "OKP", "Ed25519")
-            return jwk
+        key = Algorithm.from_jwk(jwk)
+        rust_lib.validate_key_properties(key, "OKP", "Ed25519")
         
         return key
+
+
+    def prepare_key(self, key):
+
+        try:
+            jwk = self._prepare_asymmetric_key(key)
+        except TypeError:
+            # match PyJWT - OKP tests require InvalidKeyError for bad types 
+            raise rust_lib.InvalidKeyError("Key must be PyJWK, bytes, or string")
+
+        rust_lib.validate_key_properties(jwk, "OKP", "Ed25519")
+        
+        return jwk
         
 
 
 def get_default_algorithms():
-    return {
+
+    default_algorithms = {
         "none": NoneAlgorithm(),
+        
         "HS256": HMACAlgorithm("SHA256"), "HS384": HMACAlgorithm("SHA384"), "HS512": HMACAlgorithm("SHA512"),
         "RS256": RSAAlgorithm("SHA256"), "RS384": RSAAlgorithm("SHA384"), "RS512": RSAAlgorithm("SHA512"),
         "PS256": RSAAlgorithm("SHA256"), "PS384": RSAAlgorithm("SHA384"), "PS512": RSAAlgorithm("SHA512"),
         
-        # [FIX] Use our own internal constants
         "ES256": ECAlgorithm("SHA256", SECP256R1), 
         "ES384": ECAlgorithm("SHA384", SECP384R1), 
         "ES512": ECAlgorithm("SHA512", SECP521R1), 
@@ -910,6 +756,8 @@ def get_default_algorithms():
         
         "EdDSA": OKPAlgorithm(),
     }
+
+    return default_algorithms
 
     
 ## -- Epilogue - module hack pt. 2 - reassign our python variants back to the main module

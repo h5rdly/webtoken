@@ -3,6 +3,7 @@ use base64::{engine::general_purpose::{URL_SAFE_NO_PAD, STANDARD}, Engine as _};
 use num_bigint::BigUint;
 use jsonwebtoken::{Algorithm, EncodingKey, DecodingKey};
 use jsonwebtoken::jwk::{Jwk as RustJwk};
+use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 
 use crate::{WebtokenError, is_hmac};
 use crate::crypto::{recover_primes, compute_crt};
@@ -92,6 +93,7 @@ fn b64_to_bytes(s: &str) -> Result<Vec<u8>, WebtokenError> {
     URL_SAFE_NO_PAD.decode(s).map_err(|e| WebtokenError::Generic(e.to_string()))
 }
 
+
 fn encode_der_len(out: &mut Vec<u8>, len: usize) {
     if len < 128 {
         out.push(len as u8);
@@ -110,6 +112,7 @@ fn encode_der_len(out: &mut Vec<u8>, len: usize) {
     }
 }
 
+
 fn encode_der_int(out: &mut Vec<u8>, bytes: &[u8]) {
     out.push(0x02);
     let mut slice = bytes;
@@ -124,6 +127,7 @@ fn encode_der_int(out: &mut Vec<u8>, bytes: &[u8]) {
     }
     out.extend_from_slice(slice);
 }
+
 
 fn validate_ec_coordinates(jwk: &Value) -> Result<(), String> {
     if let Some("EC") = jwk.get("kty").and_then(|v| v.as_str()) {
@@ -146,6 +150,7 @@ fn validate_ec_coordinates(jwk: &Value) -> Result<(), String> {
     Ok(())
 }
 
+
 fn validate_curve(jwk: &Value, alg: Algorithm) -> Result<(), WebtokenError> {
     if let Some("EC") = jwk.get("kty").and_then(|v| v.as_str()) {
         let crv = jwk.get("crv").and_then(|v| v.as_str()).unwrap_or("");
@@ -163,6 +168,7 @@ fn validate_curve(jwk: &Value, alg: Algorithm) -> Result<(), WebtokenError> {
     }
     Ok(())
 }
+
 
 pub fn normalize(jwk: Value, algorithm_hint: Option<String>) -> Result<(Value, Option<String>), String> {
     if !jwk.is_object() { return Err("JWK must be an object".to_string()); }
@@ -207,6 +213,7 @@ pub fn deduce_algorithm(jwk: &Value) -> Result<Option<String>, String> {
     }
 }
 
+
 pub fn to_decoding_key(jwk: &Value) -> Result<DecodingKey, WebtokenError> {
     let json_str = serde_json::to_string(jwk).map_err(|e| WebtokenError::Generic(e.to_string()))?;
     let rust_jwk: RustJwk = serde_json::from_str(&json_str)
@@ -218,6 +225,20 @@ pub fn to_decoding_key(jwk: &Value) -> Result<DecodingKey, WebtokenError> {
 pub fn create_decoding_key(jwk: &Value, alg: Algorithm) -> Result<DecodingKey, WebtokenError> {
     validate_curve(jwk, alg)?;
     to_decoding_key(jwk)
+}
+
+
+pub fn get_rsa_bits_from_value(inner: &Value) -> Option<usize> {
+    if let Some(kty) = inner.get("kty").and_then(|s| s.as_str()) {
+        if kty == "RSA" {
+            if let Some(n_b64) = inner.get("n").and_then(|v| v.as_str()) {
+                if let Ok(n_bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(n_b64) {
+                    return Some(num_bigint::BigUint::from_bytes_be(&n_bytes).bits() as usize);
+                }
+            }
+        }
+    }
+    None
 }
 
 
@@ -398,7 +419,9 @@ pub fn create_encoding_key(jwk: &Value, alg: Algorithm) -> Result<EncodingKey, W
 
 struct DerReader<'a> { input: &'a [u8] }
 impl<'a> DerReader<'a> {
+
     fn new(input: &'a [u8]) -> Self { Self { input } }
+
     fn read_tag(&mut self) -> Result<(u8, &'a [u8]), String> {
         if self.input.is_empty() { return Err("Unexpected EOF".into()); }
         let tag = self.input[0];
@@ -418,11 +441,14 @@ impl<'a> DerReader<'a> {
         self.input = &self.input[len..];
         Ok((tag, content))
     }
+
     fn read_sequence(&mut self) -> Result<DerReader<'a>, String> {
         let (tag, content) = self.read_tag()?;
         if tag != 0x30 { return Err(format!("Expected SEQUENCE (0x30), got 0x{:02x}", tag)); }
         Ok(DerReader::new(content))
     }
+
+
     fn read_integer_bytes(&mut self) -> Result<&'a [u8], String> {
         let (tag, content) = self.read_tag()?;
         if tag != 0x02 { return Err(format!("Expected INTEGER (0x02), got 0x{:02x}", tag)); }
@@ -430,22 +456,26 @@ impl<'a> DerReader<'a> {
         while s.len() > 1 && s[0] == 0 { s = &s[1..]; }
         Ok(s)
     }
+
     fn read_octet_string(&mut self) -> Result<&'a [u8], String> {
         let (tag, content) = self.read_tag()?;
         if tag != 0x04 { return Err("Expected OCTET STRING".into()); }
         Ok(content)
     }
+
     fn read_bit_string(&mut self) -> Result<&'a [u8], String> {
         let (tag, content) = self.read_tag()?;
         if tag != 0x03 { return Err("Expected BIT STRING".into()); }
         if content.is_empty() { return Err("Empty BIT STRING".into()); }
         Ok(&content[1..])
     }
+
     fn read_oid(&mut self) -> Result<&'a [u8], String> {
         let (tag, content) = self.read_tag()?;
         if tag != 0x06 { return Err("Expected OID".into()); }
         Ok(content)
     }
+
     fn read_optional_explicit(&mut self, tag_id: u8) -> Result<Option<DerReader<'a>>, String> {
         if !self.input.is_empty() && self.input[0] == (0xA0 | tag_id) {
             let (_, content) = self.read_tag()?;
@@ -454,9 +484,12 @@ impl<'a> DerReader<'a> {
     }
 }
 
+
 fn b64(data: &[u8]) -> String { URL_SAFE_NO_PAD.encode(data) }
 
+
 fn parse_rsa_private(der: &[u8]) -> Result<Value, String> {
+
     let mut reader = DerReader::new(der).read_sequence().or(Err("Not a sequence"))?;
     let _ver = reader.read_integer_bytes().map_err(|e| format!("Failed to read Version: {}", e))?;
 
@@ -483,7 +516,9 @@ fn parse_rsa_private(der: &[u8]) -> Result<Value, String> {
     Ok(json!({ "kty": "RSA", "n": b64(n), "e": b64(e), "d": b64(d), "p": b64(p), "q": b64(q), "dp": b64(dp), "dq": b64(dq), "qi": b64(qi) }))
 }
 
+
 fn parse_rsa_public(der: &[u8]) -> Result<Value, String> {
+
     let mut reader = DerReader::new(der).read_sequence()?;
     if !reader.input.is_empty() && reader.input[0] == 0x30 {
         let _algo = reader.read_sequence()?;
@@ -494,40 +529,6 @@ fn parse_rsa_public(der: &[u8]) -> Result<Value, String> {
     Ok(json!({ "kty": "RSA", "n": b64(n), "e": b64(e) }))
 }
 
-fn parse_ssh_key(bytes: &[u8]) -> Result<Value, String> {
-    let mut reader = std::io::Cursor::new(bytes);
-    fn read_blob(r: &mut std::io::Cursor<&[u8]>) -> Result<Vec<u8>, String> {
-        let mut len_bytes = [0u8; 4];
-        if std::io::Read::read_exact(r, &mut len_bytes).is_err() { return Err("EOF reading length".into()); }
-        let len = u32::from_be_bytes(len_bytes) as usize;
-        let mut b = vec![0u8; len];
-        if std::io::Read::read_exact(r, &mut b).is_err() { return Err("EOF reading body".into()); }
-        Ok(b)
-    }
-    let type_str = read_blob(&mut reader)?;
-    if type_str == b"ssh-rsa" {
-        let e = read_blob(&mut reader)?; let n = read_blob(&mut reader)?;
-        fn strip(b: &[u8]) -> &[u8] { if !b.is_empty() && b[0] == 0 { &b[1..] } else { b } }
-        return Ok(json!({ "kty": "RSA", "n": b64(strip(&n)), "e": b64(strip(&e)) }));
-    }
-    if type_str == b"ssh-ed25519" {
-        let pub_key = read_blob(&mut reader)?;
-        return Ok(json!({ "kty": "OKP", "crv": "Ed25519", "x": b64(&pub_key) }));
-    }
-    Err(format!("Unsupported SSH key type: {:?}", String::from_utf8_lossy(&type_str)))
-}
-
-fn parse_okp_private(der: &[u8]) -> Result<Value, String> {
-    let mut reader = DerReader::new(der).read_sequence()?;
-    let _ver = reader.read_integer_bytes()?;
-    let mut algo = reader.read_sequence()?;
-    let oid = algo.read_oid()?;
-    let crv = match oid { [0x2b, 0x65, 0x70] => "Ed25519", [0x2b, 0x65, 0x71] => "Ed448", _ => return Err("Not OKP".into()), };
-    let outer = reader.read_octet_string()?;
-    let mut inner = DerReader::new(outer);
-    let d = inner.read_octet_string()?;
-    Ok(json!({ "kty": "OKP", "crv": crv, "d": b64(d) }))
-}
 
 fn parse_okp_public(der: &[u8]) -> Result<Value, String> {
     let mut reader = DerReader::new(der).read_sequence()?;
@@ -537,6 +538,38 @@ fn parse_okp_public(der: &[u8]) -> Result<Value, String> {
     let bits = reader.read_bit_string()?;
     Ok(json!({ "kty": "OKP", "crv": crv, "x": b64(bits) }))
 }
+
+
+fn parse_okp_private(der: &[u8]) -> Result<Value, String> {
+
+    let mut reader = DerReader::new(der).read_sequence()?;
+    let _ver = reader.read_integer_bytes()?;
+    let mut algo = reader.read_sequence()?;
+    let oid = algo.read_oid()?;
+    
+    let crv = match oid { 
+        [0x2b, 0x65, 0x70] => "Ed25519", 
+        [0x2b, 0x65, 0x71] => "Ed448", 
+        _ => return Err("Not OKP".into()), 
+    };
+    
+    let outer = reader.read_octet_string()?;
+    let mut inner = DerReader::new(outer);
+    let d = inner.read_octet_string()?; // This is the private seed
+    
+    let mut j = json!({ "kty": "OKP", "crv": crv, "d": b64(d) });
+
+    // Derive public key 'x' from private seed 'd' for Ed25519, so that the JWK is complete
+    if crv == "Ed25519" {
+         if let Ok(kp) = Ed25519KeyPair::from_seed_unchecked(d) {
+             let x = kp.public_key().as_ref();
+             j["x"] = json!(b64(x));
+         }
+    }
+
+    Ok(j)
+}
+
 
 fn parse_ec_public(der: &[u8]) -> Result<Value, String> {
     let mut reader = DerReader::new(der).read_sequence()?;
@@ -625,16 +658,16 @@ fn parse_ec_private(der: &[u8]) -> Result<Value, String> {
     Ok(j)
 }
 
+
 pub fn pem_to_jwk(pem_bytes: &[u8]) -> Result<String, String> {
     let s = std::str::from_utf8(pem_bytes).map_err(|_| "Invalid UTF-8")?;
     let s_trim = s.trim();
 
-    if s_trim.starts_with("ssh-") {
-        let parts: Vec<&str> = s_trim.split_whitespace().collect();
-        if parts.len() < 2 { return Err("Invalid SSH key format".into()); }
-        let body = parts[1];
-        let der = STANDARD.decode(body).map_err(|_| "Invalid SSH Base64")?;
-        return parse_ssh_key(&der).map(|v| v.to_string());
+    // [FIX] Detect ECDSA SSH keys and delegate to crypto::ssh_to_pem
+    if s_trim.starts_with("ssh-") || s_trim.starts_with("ecdsa-") {
+        let pem_vec = crate::crypto::ssh_to_pem(s_trim.as_bytes())?;
+        // Recurse: Parse the generated PEM (which will now hit the -----BEGIN block below)
+        return pem_to_jwk(&pem_vec);
     }
 
     let start_idx = s.find("-----BEGIN").ok_or("Missing Header")?;
@@ -650,7 +683,6 @@ pub fn pem_to_jwk(pem_bytes: &[u8]) -> Result<String, String> {
     
     let body = &s[body_start..end_idx];
     
-    // [FIX] Permissive cleaning: remove non-base64 chars and normalize URL-safe chars to standard
     let base64_data: String = body.lines()
         .filter(|l| !l.contains(':')) 
         .flat_map(|l| l.trim().chars())
