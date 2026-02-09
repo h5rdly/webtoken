@@ -121,10 +121,14 @@ def _rust_decode_with_exception_fix(
         return _rust_decode_complete(
             token, key, algorithms, merged_options, audience, issuer, subject, verify_sig, content, return_dict)
     except rust_lib.MissingRequiredClaimError as e:
-        # PyJWT expects the exception instance to have a .claim attribute
         if ": " in (msg := str(e)): 
             e.claim = msg.split(": ")[1]
+        else:        
+            if (start := msg.find('"')) != -1:
+                if (end := msg.find('"', start + 1)) != -1:
+                    e.claim = msg[start + 1 : end]
         raise e
+
 
 
 
@@ -181,8 +185,8 @@ def decode_complete(
 ) -> dict[str, object]:
     
     merged_options = options.copy() if options else {}
-    # PyJWT compat warning
     if verify is not _sentinel:
+        # PyJWT compat warning
         warnings.warn("The `verify` argument to `decode` does nothing in PyJWT 2.0 and newer.", DeprecationWarning, stacklevel=2)
         if verify is False: 
             merged_options["verify_signature"] = False
@@ -192,29 +196,7 @@ def decode_complete(
     
     decoded_struct = _rust_decode_with_exception_fix(
         token, key, algorithms, merged_options, audience, issuer, subject, verify_sig, content)
-    payload_data = decoded_struct["payload"]
     
-    if isinstance(payload_data, dict):
-        payload = payload_data
-    else:
-        try:
-            payload = _rust_json_loads(payload_data)
-        except Exception:
-            raise rust_lib.DecodeError("Invalid payload string: must be a json object")
-        
-        try:
-            _rust_validate_claims(payload, merged_options, audience, issuer, subject, leeway)
-        except rust_lib.MissingRequiredClaimError as e:
-            msg = str(e)
-            if ": " in msg: 
-                e.claim = msg.split(": ")[1]
-            else:        
-                if (start := msg.find('"')) != -1:
-                    if (end := msg.find('"', start + 1)) != -1:
-                        e.claim = msg[start + 1 : end]
-
-    decoded_struct["payload"] = payload
-
     return decoded_struct
 
 
@@ -245,6 +227,175 @@ async def decode_async(
         decode, token, key, algorithms, options, audience, issuer, subject, verify, content
     )
 
+
+
+## -- Wrapper Classes form PyJWT compat
+
+def _enforce_hmac_key_length(algorithm: str, key: str | bytes, raise_on_keylength = False):
+
+    if not algorithm.startswith("HS"):
+        return
+
+    key_bytes = key.encode("utf-8") if isinstance(key, str) else key
+    if not isinstance(key_bytes, bytes):
+        return
+        
+    min_len = {"HS256": 32, "HS384": 48, "HS512": 64}.get(algorithm, 0)
+    if (key_len := len(key_bytes)) >= min_len:
+        return
+        
+    msg = f"The specified key is {key_len} bytes long, which is below the minimum recommended length of {min_len} bytes."
+    if raise_on_keylength:
+        raise rust_lib.InvalidKeyError(msg)
+    else:
+        warnings.warn(msg, InsecureKeyLengthWarning)
+
+
+class PyJWT:
+
+    def __init__(self, options=None):
+        self.options = {"verify_signature": True, "verify_exp": True, "verify_nbf": True, "verify_iat": True, "verify_aud": True, "verify_iss": True, "verify_sub": True, "verify_jti": True, "require": []}
+        if options: self.options.update(options)
+    
+
+    def encode(self, payload, key, algorithm="HS256", headers=None, json_encoder=None, sort_headers=True):
+        _enforce_hmac_key_length(algorithm, key, raise_on_keylength=True)
+        return encode(payload, key, algorithm, headers, json_encoder, sort_headers)
+    
+
+    def decode(self, token, key="", algorithms=None, options=None, **kwargs):
+        merged = _merge_options(self.options, options, kwargs)
+        return decode(token, key, algorithms, merged, **kwargs)
+    
+
+    def decode_complete(self, token, key="", algorithms=None, options=None, **kwargs):
+
+        merged = _merge_options(self.options, options, kwargs)
+
+        if hasattr(self, "_decode_payload"):
+             decoded_struct = _rust_decode_with_exception_fix(
+                token, key, algorithms, merged, None, None, None, merged.get("verify_signature", True), 
+                None, return_dict=False) 
+
+             # Pass the raw struct to the custom python decoder
+             payload = self._decode_payload(decoded_struct)
+             
+             # Validate the result of the custom decoder
+             _rust_validate_claims(payload, merged, **kwargs)
+             decoded_struct["payload"] = payload
+
+             return decoded_struct
+
+        return decode_complete(token, key, algorithms, merged, **kwargs)
+
+        
+class PyJWS:
+
+    header_typ = "JWT"
+
+    def __init__(self, algorithms=None, options=None):
+
+        self._algorithms = get_default_algorithms()
+        self.options = {
+            "verify_signature": True,
+            "verify_exp": True,
+            "verify_nbf": True,
+            "verify_iat": True,
+            "verify_aud": True,
+            "verify_iss": True,
+            "require": [],
+        }
+        
+        if options:
+            if not isinstance(options, dict):
+                raise TypeError("options must be a dict")
+            self.options.update(options)
+
+        if algorithms:
+            allowed = set(algorithms)
+            for k in list(self._algorithms.keys()):
+                if k not in allowed: del self._algorithms[k]
+
+
+    def register_algorithm(self, alg_id, alg_obj):
+        if alg_id in self._algorithms: raise ValueError("Algorithm already has a handler.")
+        if not isinstance(alg_obj, Algorithm): raise TypeError("Object is not of type `Algorithm`")
+        self._algorithms[alg_id] = alg_obj
+    
+
+    def unregister_algorithm(self, alg_id):
+        if alg_id not in self._algorithms: raise KeyError("The specified algorithm could not be removed because it is not registered.")
+        del self._algorithms[alg_id]
+    
+
+    def get_algorithms(self): return list(self._algorithms.keys())
+    
+
+    def get_algorithm_by_name(self, alg_name):
+        try: return self._algorithms[alg_name]
+        except KeyError: raise NotImplementedError("Algorithm not supported")
+
+
+    def get_unverified_header(self, token): 
+        return _rust_get_header(token)
+
+
+    def encode(self, payload, key, algorithm="HS256", headers=None, json_encoder=None, is_payload_detached=False, sort_headers=False):
+        
+        if headers and "alg" in headers: 
+            algorithm = headers["alg"]
+
+        if algorithm not in self._algorithms: 
+            raise NotImplementedError("Algorithm not supported")
+        
+        check_len = self.options.get("enforce_minimum_key_length", False)
+        _enforce_hmac_key_length(algorithm, key, raise_on_keylength=check_len)
+
+        return encode(payload, key, algorithm, headers, json_encoder, sort_headers, check_length=check_len)
+    
+
+    def decode(
+        self,
+        token: str | bytes,
+        key: str | bytes | PyJWK = "",
+        algorithms: list[str] | None = None,
+        options: dict[str, object] | None = None,
+        detached_payload: bytes = None,
+        **kwargs: object,
+    ) -> dict[str, object] | bytes:
+        
+        decoded = self.decode_complete(token, key, algorithms, options, detached_payload=detached_payload, **kwargs)
+        return decoded["payload"]
+    
+
+    def decode_complete(
+        self,
+        token: str | bytes,
+        key: str | bytes | PyJWK = "",
+        algorithms: list[str] | None = None,
+        options: dict[str, object] | None = None,
+        detached_payload: bytes = None,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        
+        pyjwt_allowed_kwargs = {"verify", "audience", "issuer", "subject", "leeway"}
+        for k in kwargs:
+            if k not in pyjwt_allowed_kwargs:
+                # To pass PyJWT compat tests, dump at some point
+                warnings.warn(
+                    f"Argument '{k}' is not supported and will be removed in a future version",
+                    category=RemovedInPyjwt3Warning,
+                    stacklevel=2,
+                )
+
+        merged_ops = self.options.copy()
+        if options: merged_ops.update(options)
+
+        verify_sig = merged_ops.get("verify_signature", True)
+        
+        return _rust_decode_with_exception_fix(
+            token, key, algorithms, merged_ops, None, None, None, verify_sig, detached_payload, return_dict=False)
+    
 
 
 # -- Curves shim  
@@ -761,186 +912,7 @@ def get_default_algorithms():
     }
 
     
-## -- Wrapper Classes form PyJWT compat
-
-def _enforce_hmac_key_length(algorithm: str, key: str | bytes, raise_on_keylength = False):
-
-    if not algorithm.startswith("HS"):
-        return
-
-    key_bytes = key.encode("utf-8") if isinstance(key, str) else key
-    if not isinstance(key_bytes, bytes):
-        return
-        
-    min_len = {"HS256": 32, "HS384": 48, "HS512": 64}.get(algorithm, 0)
-    if (key_len := len(key_bytes)) >= min_len:
-        return
-        
-    msg = f"The specified key is {key_len} bytes long, which is below the minimum recommended length of {min_len} bytes."
-    if raise_on_keylength:
-        raise rust_lib.InvalidKeyError(msg)
-    else:
-        warnings.warn(msg, InsecureKeyLengthWarning)
-
-
-class PyJWS:
-
-    header_typ = "JWT"
-
-    def __init__(self, algorithms=None, options=None):
-
-        self._algorithms = get_default_algorithms()
-        self.options = {
-            "verify_signature": True,
-            "verify_exp": True,
-            "verify_nbf": True,
-            "verify_iat": True,
-            "verify_aud": True,
-            "verify_iss": True,
-            "require": [],
-        }
-        
-        if options:
-            if not isinstance(options, dict):
-                raise TypeError("options must be a dict")
-            self.options.update(options)
-
-        if algorithms:
-            allowed = set(algorithms)
-            for k in list(self._algorithms.keys()):
-                if k not in allowed: del self._algorithms[k]
-
-
-    def register_algorithm(self, alg_id, alg_obj):
-        if alg_id in self._algorithms: raise ValueError("Algorithm already has a handler.")
-        if not isinstance(alg_obj, Algorithm): raise TypeError("Object is not of type `Algorithm`")
-        self._algorithms[alg_id] = alg_obj
-    
-
-    def unregister_algorithm(self, alg_id):
-        if alg_id not in self._algorithms: raise KeyError("The specified algorithm could not be removed because it is not registered.")
-        del self._algorithms[alg_id]
-    
-
-    def get_algorithms(self): return list(self._algorithms.keys())
-    
-
-    def get_algorithm_by_name(self, alg_name):
-        try: return self._algorithms[alg_name]
-        except KeyError: raise NotImplementedError("Algorithm not supported")
-
-
-    def get_unverified_header(self, token): 
-        return _rust_get_header(token)
-
-
-    def encode(self, payload, key, algorithm="HS256", headers=None, json_encoder=None, is_payload_detached=False, sort_headers=False):
-        
-        if headers and "alg" in headers: 
-            algorithm = headers["alg"]
-
-        if algorithm not in self._algorithms: 
-            raise NotImplementedError("Algorithm not supported")
-        
-        check_len = self.options.get("enforce_minimum_key_length", False)
-        _enforce_hmac_key_length(algorithm, key, raise_on_keylength=check_len)
-
-        return encode(payload, key, algorithm, headers, json_encoder, sort_headers, check_length=check_len)
-    
-
-    def decode(
-        self,
-        token: str | bytes,
-        key: str | bytes | PyJWK = "",
-        algorithms: list[str] | None = None,
-        options: dict[str, object] | None = None,
-        detached_payload: bytes = None,
-        **kwargs: object,
-    ) -> dict[str, object] | bytes:
-        
-        decoded = self.decode_complete(token, key, algorithms, options, detached_payload=detached_payload, **kwargs)
-        return decoded["payload"]
-    
-
-    def decode_complete(
-        self,
-        token: str | bytes,
-        key: str | bytes | PyJWK = "",
-        algorithms: list[str] | None = None,
-        options: dict[str, object] | None = None,
-        detached_payload: bytes = None,
-        **kwargs: object,
-    ) -> dict[str, object]:
-        
-        pyjwt_allowed_kwargs = {"verify", "audience", "issuer", "subject", "leeway"}
-        for k in kwargs:
-            if k not in pyjwt_allowed_kwargs:
-                # To pass PyJWT compat tests, dump at some point
-                warnings.warn(
-                    f"Argument '{k}' is not supported and will be removed in a future version",
-                    category=RemovedInPyjwt3Warning,
-                    stacklevel=2,
-                )
-
-        merged_ops = self.options.copy()
-        if options: merged_ops.update(options)
-
-        verify_sig = merged_ops.get("verify_signature", True)
-        
-        return _rust_decode_with_exception_fix(
-            token, key, algorithms, merged_ops, None, None, None, verify_sig, detached_payload, return_dict=False)
-    
-
-
-class PyJWT:
-
-    def __init__(self, options=None):
-        self.options = {"verify_signature": True, "verify_exp": True, "verify_nbf": True, "verify_iat": True, "verify_aud": True, "verify_iss": True, "verify_sub": True, "verify_jti": True, "require": []}
-        if options: self.options.update(options)
-    
-
-    def encode(self, payload, key, algorithm="HS256", headers=None, json_encoder=None, sort_headers=True):
-        _enforce_hmac_key_length(algorithm, key, raise_on_keylength=True)
-        return encode(payload, key, algorithm, headers, json_encoder, sort_headers)
-    
-
-    def decode(self, token, key="", algorithms=None, options=None, **kwargs):
-        merged = _merge_options(self.options, options, kwargs)
-        return decode(token, key, algorithms, merged, **kwargs)
-    
-
-    def decode_complete(self, token, key="", algorithms=None, options=None, **kwargs):
-
-        merged = _merge_options(self.options, options, kwargs)
-
-        if hasattr(self, "_decode_payload") and getattr(self._decode_payload, "__func__", None) is not PyJWT._decode_payload:
-             decoded_struct = _rust_decode_with_exception_fix(
-                token, key, algorithms, merged, None, None, None, merged.get("verify_signature", True), 
-                None, return_dict=True)
-
-             payload_data = decoded_struct["payload"]
-             if isinstance(payload_data, dict):
-                 decoded_struct["payload"] = _rust_json_dumps(payload_data).encode("utf-8")
-             payload = self._decode_payload(decoded_struct)
-             _rust_validate_claims(payload, merged, **kwargs)
-             decoded_struct["payload"] = payload
-
-             return decoded_struct
-
-        return decode_complete(token, key, algorithms, merged, **kwargs)
-    
-
-    def _decode_payload(self, decoded):
-
-        try:
-            val = decoded["payload"]
-            if isinstance(val, bytes): val = val.decode('utf-8')
-            return _rust_json_loads(val)
-        except Exception as e: raise rust_lib.DecodeError(f"Invalid payload string: {e}")
-
-
-
-## -- Epilogue - module hack cont. - reassign our python variants back to the main module
+## -- Epilogue - module hack pt. 2 - reassign our python variants back to the main module
 
 rust_lib.encode = encode
 rust_lib.decode = decode

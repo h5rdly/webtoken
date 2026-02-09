@@ -827,28 +827,38 @@ fn decode_impl(
     }
 
     if !convert_to_json {
-        // return bytes immediately as per PyJWT. No parsing, JWS only cares about signature
         return Ok(TokenPayload::Raw(payload_bytes));
     }
 
-    if let Ok(claims) = from_slice::<Value>(&payload_bytes) {
-        validate_claims_content(&claims, &validation, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud, &expected_aud, &expected_iss, &expected_sub)?;
-        
-        if check_iat {
-             if let Some(val) = claims.get("iat") {
-                 if let Some(iat) = get_numeric_date(val) {
-                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as f64;
-                     if iat > (now + (validation.leeway as f64)) {
-                         return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::ImmatureSignature)));
-                     }
-                 }
-             }
-        }
-        Ok(TokenPayload::Claims(claims))
-    } else {
-        Ok(TokenPayload::Raw(payload_bytes))
+    let claims: Value = from_slice(&payload_bytes).map_err(|_| WebtokenError::Custom { 
+        exc: "DecodeError".into(), 
+        msg: "Invalid payload string: must be a json object".into() 
+    })?;
+
+    // Must be a JSON Object (dict), not a number/string/list
+    if !claims.is_object() {
+        return Err(WebtokenError::Custom { 
+            exc: "DecodeError".into(), 
+            msg: "Invalid payload string: must be a json object".into() 
+        });
     }
-}
+
+    validate_claims_content(&claims, &validation, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud, &expected_aud, &expected_iss, &expected_sub)?;
+    
+    if check_iat {
+            if let Some(val) = claims.get("iat") {
+                if let Some(iat) = get_numeric_date(val) {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as f64;
+                    if iat > (now + (validation.leeway as f64)) {
+                        return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::ImmatureSignature)));
+                    }
+                }
+            }
+    }
+    Ok(TokenPayload::Claims(claims))
+} 
+   
+
 
 
 fn decode_complete_impl(

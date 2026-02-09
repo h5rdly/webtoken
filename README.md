@@ -14,10 +14,10 @@ The Rust `.so` file on linux is ~3.7Mb, no external dependencies.
 
 ```
 HS256
-Enc: 2.1x | Dec: 1.9x
+Enc: 2.1x | Dec: 1.5x
 
 RS256
-Enc: 54.4x | Dec: 1.4x
+Enc: 54.4x | Dec: 1.3x
 
 ES256
 Enc: 1.9x | Dec: 1.4x
