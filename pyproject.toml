@@ -4,10 +4,13 @@ build-backend = "maturin"
 
 [project]
 name = "webtoken"
-version = "0.1.0"
+version = "0.4.1"
 description = "A Rust-backed JWT library"
 readme = "README.md"
 requires-python = ">=3.11"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/webtoken"
 
 [tool.maturin]
 features = ["pyo3/extension-module", "pyo3/abi3-py311"]
