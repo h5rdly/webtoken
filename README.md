@@ -53,9 +53,7 @@ print(decoded)
 # {'sub': '1234567890', 'name': 'John Doe', 'iat': 1516239022}
 ```
 
-2. webtoken style - in design
-
-3. Asyncio variants
+2. Asyncio variants
 
 ```python
 import webtoken as wt
@@ -73,11 +71,11 @@ print(decoded)
 
 ##  Compatibility
 
-Effort is made to make toke as compatible as possible with [PyJWT](https://github.com/jpadilla/pyjwt). To that effect, changes are made to make the relevant tests from the extensive PyJWT [test suite](https://github.com/jpadilla/pyjwt/tree/master/tests) pass. 
+Effort is made to make toke as compatible as possible with [PyJWT](https://github.com/jpadilla/pyjwt). For compatibility details, See the readme under [tests](https://github.com/h5rdly/webtoken/tree/main/tests). 
 
 ##  Crypto
 
-Toke is backed by [jsonwebtoken](https://github.com/Keats/jsonwebtoken) and [aws-lc-rs](https://github.com/aws/aws-lc-rs).
+The crypto backend used by webtoken is [aws-lc-rs](https://github.com/aws/aws-lc-rs).
 
 
 ### Supported algorithms
@@ -88,13 +86,8 @@ Via jsonwebtoken -
 - HS512
 - RS256
 - RS384
-- RS512
-
-Via aws-lc-rs - 
+- RS512-
 - ES512
 - ES256K
 - ML-DSA-65
 
-##  Fun Facts
-
-- Using the Rust Crypto backend with jsonwebtoken made the binary around ~1Mb on linux. However, RSA decoding was slower than using PyJWT. Thus, we switched to aws-lc-rs.  
