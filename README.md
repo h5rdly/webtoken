@@ -41,7 +41,7 @@ See (and suggest!) more benchmarks under [benchmarks](https://github.com/h5rdly/
 
 ##  Usage
 
-1. PyJWT Style (Drop-in Replacement)
+#### PyJWT Style (Drop-in Replacement)
 
 ```python
 import webtoken as jwt
@@ -55,7 +55,7 @@ print(decoded)
 # {'sub': '1234567890', 'name': 'John Doe', 'iat': 1516239022}
 ```
 
-2. Asyncio variants
+#### Asyncio variants
 
 ```python
 import webtoken as wt
@@ -69,6 +69,29 @@ token = await wt.encode_async(payload, "secret", algorithm="HS256")
 decoded = await wt.decode_async(token, "secret", algorithms=["HS256"])
 print(decoded)
 # {'name': 'Bob'}
+```
+#### Crypto / base64 complementary utils
+
+Since webtoken already has aws-lc-rs in its standalone module, it exposes several auxiliary utilities.
+
+This, for example, allows running tests, such as the PyJWT ported test suites, without importing cryptography.
+
+```python
+import webtoken as wt
+
+
+wt.base64url_encode('bob')    # utf8 strings or bytes
+# b'Ym9i'
+
+wt.base64url_decode(b'Ym9i').decode()
+# 'bob'
+
+wt.random_bytes(7)       # cryptographically secure random bytes 
+# b'j>A\x0cj\xac\x7f'
+
+priv, pub = wt.generate_key_pair('rs256')
+# pub = b'-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhki.......a2ODLeYTResxi\nnQIDAQAB\n-----END PUBLIC KEY-----\n'
+
 ```
 
 ##  Compatibility
