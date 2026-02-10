@@ -37,7 +37,7 @@ See and suggest more benchmarks under [benchmarks](https://github.com/h5rdly/tok
 
 - Developed on Linux / Python 3.13
 - Wheels available for Linux (+ Alpine) / Windows / MacOS 
-- sdist for FreeBSD
+- `sdist` for FreeBSD
 
 ##  Usage
 
