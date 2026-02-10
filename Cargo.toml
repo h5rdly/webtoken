@@ -3,7 +3,7 @@ name = "webtoken"
 edition = "2024"
 
 [lib]
-name = "webtoken"
+name = "_webtoken"
 crate-type = ["cdylib"]
 
 [dependencies]

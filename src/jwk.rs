@@ -180,12 +180,14 @@ pub fn normalize(jwk: Value, algorithm_hint: Option<String>) -> Result<(Value, O
     Ok((jwk, alg))
 }
 
+
 pub fn normalize_key_set(keys: Vec<Value>) -> Vec<(Value, Option<String>)> {
     keys.into_iter().filter_map(|k| {
         if let Some("enc") = k.get("use").and_then(|u| u.as_str()) { return None; }
         normalize(k, None).ok()
     }).collect()
 }
+
 
 pub fn deduce_algorithm(jwk: &Value) -> Result<Option<String>, String> {
     let kty = jwk.get("kty").and_then(|v| v.as_str()).ok_or("kty missing")?;

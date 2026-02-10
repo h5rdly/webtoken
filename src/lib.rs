@@ -178,7 +178,7 @@ fn raw_verify(message: &[u8], signature: &[u8], key: &Bound<'_, PyAny>, algorith
 
 
 #[pyfunction]
-#[pyo3(signature = (payload, key, algorithm="HS256", headers=None, sort_headers=true, check_length=false))] // [FIX] Added arg
+#[pyo3(signature = (payload, key, algorithm="HS256", headers=None, sort_headers=true, check_length=false))] 
 fn sign(
     payload: &Bound<'_, PyAny>, 
     key: &Bound<'_, PyAny>, 
@@ -302,7 +302,7 @@ fn sort_map(map: &mut Map<String, Value>) {
 }
 
 
-fn looks_like_public_key(key: &[u8]) -> bool {
+fn bytes_look_like_public_key(key: &[u8]) -> bool {
     if let Ok(s) = from_utf8(key) {
         let s = s.trim();
         s.starts_with("-----BEGIN") 
@@ -311,6 +311,17 @@ fn looks_like_public_key(key: &[u8]) -> bool {
     } else { 
         false 
     }
+}
+
+
+pub fn looks_like_public_key(key: &Bound<'_, PyAny>) -> bool {
+    if let Ok(b) = key.extract::<Vec<u8>>() {
+        return bytes_look_like_public_key(&b);
+    }
+    if let Ok(s) = key.extract::<String>() {
+        return bytes_look_like_public_key(s.as_bytes());
+    }
+    false
 }
 
 
@@ -373,7 +384,7 @@ fn get_key_bytes(key: &Bound<'_, PyAny>, alg_name: &str, is_signing: bool, check
     let alg = Algorithm::from_str(alg_name).map_err(|_| PyNotImplementedError::new_err(format!("Algorithm '{}' not supported", alg_name)))?;
     
     if is_hmac(alg) {
-        if looks_like_public_key(key_slice) { 
+        if bytes_look_like_public_key(key_slice) { 
             return Err(InvalidKeyError::new_err("The specified key is an asymmetric key... should not be used as an HMAC secret.")); 
         }
 
@@ -451,7 +462,6 @@ fn extract_aud_iss(
         } else if let Ok(aud_list) = aud.extract::<Vec<String>>() {
             for a in aud_list { s.insert(a); } 
         } else {
-            // [FIX] Distinguish between bytes (InvalidAudience) and other types (TypeError)
             if aud.is_instance_of::<PyBytes>() {
                 return Err(InvalidAudienceError::new_err("audience must be a string, iterable or None"));
             }
@@ -467,7 +477,6 @@ fn extract_aud_iss(
         } else if let Ok(iss_list) = iss.extract::<Vec<String>>() {
             for i in iss_list { s.insert(i); } 
         } else {
-            // [FIX] Distinguish between bytes (InvalidIssuer) and other types (TypeError)
             if iss.is_instance_of::<PyBytes>() {
                 return Err(InvalidIssuerError::new_err("issuer must be a string, iterable or None"));
             }
@@ -936,7 +945,6 @@ fn decode_complete<'py>(
     let mut check_length = false; // Default false
     if let Some(opts) = options {
         if let Ok(Some(v)) = opts.get_item("verify_signature") { if let Ok(b) = v.extract::<bool>() { effective_verify = b; } }
-        // [FIX] Extract check_length
         if let Ok(Some(v)) = opts.get_item("enforce_minimum_key_length") { if let Ok(b) = v.extract::<bool>() { check_length = b; } }
     }
 
@@ -971,7 +979,13 @@ fn decode_complete<'py>(
         return pythonize(py, &complete).map_err(|e| PyValueError::new_err(e.to_string()));
     }
 
-    // [FIX] Renamed output variable to `check_iat` correctly
+    if alg_str.starts_with("HS") {
+        if let Some(k) = key && looks_like_public_key(k) {
+                 return Err(InvalidKeyError::new_err("The specified key is an asymmetric key or x509 certificate and \
+                     should not be used as an HMAC secret."));   
+        }
+    }
+
     let (validation, check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud)
         = prepare_validation(algorithms.clone(), options, verify, leeway)?;
     
@@ -982,7 +996,6 @@ fn decode_complete<'py>(
     }
 
     let decoding_key = if effective_verify {
-        // [FIX] Pass check_length
         match key { Some(k) => Some(get_decoding_key(k, &alg_str, check_length)?), None => return Err(PyValueError::new_err("Key required")) }
     } else { None };
 
@@ -994,7 +1007,7 @@ fn decode_complete<'py>(
 
 
 #[pyfunction]
-#[pyo3(signature = (payload, key, algorithm="HS256", headers=None, sort_headers=true, check_length=false))] // [FIX] Added arg
+#[pyo3(signature = (payload, key, algorithm="HS256", headers=None, sort_headers=true, check_length=false))] 
 fn encode(
     payload: &Bound<'_, PyDict>, 
     key: &Bound<'_, PyAny>, 
@@ -1181,7 +1194,7 @@ fn add_submodule_with_sys(
 }
 
 #[pymodule]
-fn webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PyJWTError", py.get_type::<PyJWTError>())?;
     m.add("InvalidTokenError", py.get_type::<InvalidTokenError>())?;
     m.add("DecodeError", py.get_type::<DecodeError>())?;
@@ -1221,7 +1234,18 @@ fn webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py_utils::export_py_utils(m)?;
 
     add_submodule_with_sys(py, m, "api_jwk", |_py, mod_| {
+        mod_.add_class::<PyJWK>()?;
+        mod_.add_class::<PyJWKSet>()?;
         pyjwt_jwk_api::register_jwk_module(py, mod_)
+    })?;
+
+    add_submodule_with_sys(py, m, "api_jws", |_py, mod_| {
+        mod_.add_function(wrap_pyfunction!(get_unverified_header, mod_)?)?;
+        Ok(())
+    })?;
+
+    add_submodule_with_sys(py, m, "algorithms", |_py, _mod_| {
+        Ok(())
     })?;
 
     add_submodule_with_sys(py, m, "exceptions", |_py, m_exc| {
@@ -1241,5 +1265,8 @@ fn webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m_exc.add("InvalidKeyError", py.get_type::<InvalidKeyError>())?;
         Ok(())
     })?;
+
+    
+
     Ok(())
 }

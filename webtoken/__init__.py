@@ -1,17 +1,29 @@
 import os, sys, importlib.util
 
+from .webtoken import _validate_iss
 
-module_name = 'webtoken'
-file_path = f'{__file__.rsplit('/', 1)[0]}/{module_name}.py'
-spec = importlib.util.spec_from_file_location(module_name, file_path)
+from .webtoken import *
+(
+    encode, decode, decode_complete, PyJWT, PyJWS, PyJWK,
+)
 
-if spec and spec.loader:
-    lib = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = lib
-    spec.loader.exec_module(lib)
-    # sys.modules[__name__] = mod
-else:
-    print(f"Could not find or load {file_path}")
+# __all__ = [
+#     "encode", "decode", "decode_complete",
+#     "PyJWT", "PyJWS", "PyJWK",
+
+# ]
+
+# module_name = '_webtoken'
+# file_path = f'{__file__.rsplit('/', 1)[0]}/{module_name}.py'
+# spec = importlib.util.spec_from_file_location(module_name, file_path)
+
+# if spec and spec.loader:
+#     lib = importlib.util.module_from_spec(spec)
+#     sys.modules[module_name] = lib
+#     spec.loader.exec_module(lib)
+#     # sys.modules[__name__] = mod
+# else:
+#     print(f"Could not find or load {file_path}")
 
 
 '''

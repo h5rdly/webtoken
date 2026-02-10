@@ -14,7 +14,7 @@ def _load_module(module_name: str, path: str):
     return None
 
 
-def _load_rust_pip_or_dev(_rust_lib_name: str = 'webtoken', module_dev_path: str = None):
+def _load_rust_pip_or_dev(_rust_lib_name: str = '_webtoken', module_dev_path: str = None):
 
     _dev_path_linux = f'target/release/lib{_rust_lib_name}.so'
     module_dev_path = module_dev_path or _dev_path_linux
@@ -35,37 +35,24 @@ def _load_rust_pip_or_dev(_rust_lib_name: str = 'webtoken', module_dev_path: str
     return rust_lib
 
 
-## -- Module hack pt. 1 - load lib, assign rust functions that we will be using
+## -- Rust module loading
 
 rust_lib = _load_rust_pip_or_dev()
+globals().update({k: v for k, v in vars(rust_lib).items() if not k.startswith("__")})
 
-_rust_encode = rust_lib.encode
-_rust_decode_complete = rust_lib.decode_complete
-_rust_get_header = rust_lib.get_unverified_header
-_rust_load_jwk = rust_lib.load_jwk
-_rust_pem_to_jwk = rust_lib.pem_to_jwk
-_rust_raw_sign = rust_lib.raw_sign
-_rust_raw_verify = rust_lib.raw_verify
-_rust_b64_decode = rust_lib.base64url_decode
-_rust_b64_encode = rust_lib.base64url_encode
-_rust_digest = getattr(rust_lib, "digest", None)
-_rust_json_loads = rust_lib.json_loads
-_rust_json_dumps = rust_lib.json_dumps
-_rust_validate_claims = rust_lib.validate_claims
+# Expose Types
+PyJWK = rust_lib.api_jwk.PyJWK
+PyJWKError = rust_lib.api_jwk.PyJWKError
+PyJWKSetError = rust_lib.api_jwk.PyJWKSetError
 
 _sentinel = object()
 
 class InsecureKeyLengthWarning(UserWarning): pass
-
 class RemovedInPyjwt3Warning(DeprecationWarning):  pass
 
-# Expose Types
-PyJWK = rust_lib.api_jwk.PyJWK
 InvalidKeyError = rust_lib.InvalidKeyError 
 rust_lib.InsecureKeyLengthWarning = InsecureKeyLengthWarning
 rust_lib.RemovedInPyjwt3Warning = RemovedInPyjwt3Warning
-
-
 
 ## --  JWT Helpers
 
@@ -118,7 +105,7 @@ def _rust_decode_with_exception_fix(
 ) -> dict[str, object]:
 
     try:
-        return _rust_decode_complete(
+        return rust_lib.decode_complete(
             token, key, algorithms, merged_options, audience, issuer, subject, verify_sig, content, return_dict)
     except rust_lib.MissingRequiredClaimError as e:
         if ": " in (msg := str(e)): 
@@ -142,8 +129,9 @@ def encode(
     check_length: bool = False
 ) -> str:
     
+    print('fpoo')
     if isinstance(payload, dict) and json_encoder is None:
-        return  _rust_encode(payload, key, algorithm, headers, sort_headers, check_length)
+        return  rust_lib.encode(payload, key, algorithm, headers, sort_headers, check_length)
 
     if not isinstance(payload, (dict, bytes)):
         raise TypeError("Expecting a dict or bytes object")
@@ -279,7 +267,7 @@ class PyJWT:
              payload = self._decode_payload(decoded_struct)
              
              # Validate the result of the custom decoder
-             _rust_validate_claims(payload, merged, **kwargs)
+             rust_lib.validate_claims(payload, merged, **kwargs)
              decoded_struct["payload"] = payload
 
              return decoded_struct
@@ -335,7 +323,7 @@ class PyJWS:
 
 
     def get_unverified_header(self, token): 
-        return _rust_get_header(token)
+        return rust_lib.get_unverified_header(token)
 
 
     def encode(self, payload, key, algorithm="HS256", headers=None, json_encoder=None, is_payload_detached=False, sort_headers=False):
@@ -433,7 +421,7 @@ class Algorithm:
 
     def compute_hash_digest(self, bytes_data):
         alg = getattr(self, "alg", "SHA256")
-        return bytes(_rust_digest(alg, bytes_data))
+        return bytes(rust_lib.digest(alg, bytes_data))
 
 
     def _prepare_asymmetric_key(self, key):
@@ -451,8 +439,8 @@ class Algorithm:
             try:
                 key_bytes = key.encode("utf-8") if isinstance(key, str) else key
                 # Fast Rust PEM parsing
-                json_str = _rust_pem_to_jwk(key_bytes)
-                return _rust_load_jwk(json_str)
+                json_str = rust_lib.pem_to_jwk(key_bytes)
+                return rust_lib.load_jwk(json_str)
             except Exception:
                 raise rust_lib.InvalidKeyError("Could not parse the provided public key.")
         
@@ -476,7 +464,7 @@ class Algorithm:
     @staticmethod
     def from_jwk(jwk):
         try: 
-            return _rust_load_jwk(_rust_json_dumps(jwk) if isinstance(jwk, dict) else jwk)
+            return rust_lib.load_jwk(rust_lib.json_dumps(jwk) if isinstance(jwk, dict) else jwk)
         except Exception as e: 
              if "Key type" in str(e): 
                 raise rust_lib.InvalidKeyError("Key type (kty) not found") 
@@ -499,8 +487,8 @@ class Algorithm:
             # 2. Fallback: Parse from PEM bytes
             try:
                 key_bytes = key if isinstance(key, bytes) else key.encode()
-                json_str = _rust_pem_to_jwk(key_bytes)
-                jwk_data = _rust_json_loads(json_str)
+                json_str = rust_lib.pem_to_jwk(key_bytes)
+                jwk_data = rust_lib.json_loads(json_str)
             except Exception:
                 raise rust_lib.InvalidKeyError("Invalid key")
 
@@ -513,7 +501,7 @@ class Algorithm:
         if as_dict:
             return jwk_data
         
-        return _rust_json_dumps(jwk_data)
+        return rust_lib.json_dumps(jwk_data)
 
 
 class NoneAlgorithm(Algorithm):
@@ -542,10 +530,10 @@ class HMACAlgorithm(Algorithm):
     
     
     def sign(self, msg, key): 
-        return bytes(_rust_raw_sign(msg, key, self.alg))
+        return bytes(rust_lib.raw_sign(msg, key, self.alg))
 
     def verify(self, msg, key, sig): 
-        return _rust_raw_verify(msg, bytes(sig), key, self.alg)
+        return rust_lib.raw_verify(msg, bytes(sig), key, self.alg)
     
 
     def check_key_length(self, key):
@@ -573,8 +561,8 @@ class HMACAlgorithm(Algorithm):
 
         if isinstance(key, (str, bytes)):
             key_bytes = key.encode("utf-8") if isinstance(key, str) else key
-            data = {"kty": "oct", "k": _rust_b64_encode(key_bytes).decode("utf-8")}
-            return data if as_dict else _rust_json_dumps(data)
+            data = {"kty": "oct", "k": rust_lib.base64url_encode(key_bytes).decode("utf-8")}
+            return data if as_dict else rust_lib.json_dumps(data)
             
         raise rust_lib.InvalidKeyError("Invalid key type for HMAC JWK generation")
 
@@ -615,10 +603,10 @@ class RSAAlgorithm(Algorithm):
 
 
     def sign(self, msg, key): 
-        return bytes(_rust_raw_sign(msg, key, self.alg))
+        return bytes(rust_lib.raw_sign(msg, key, self.alg))
 
     def verify(self, msg, key, sig): 
-        return _rust_raw_verify(msg, bytes(sig), key, self.alg)
+        return rust_lib.raw_verify(msg, bytes(sig), key, self.alg)
     
     def check_key_length(self, key):
         return rust_lib.check_rsa_key_length(key)
@@ -631,7 +619,7 @@ class RSAAlgorithm(Algorithm):
         if "key_ops" not in jwk_dict:
             jwk_dict["key_ops"] = ["sign"] if "d" in jwk_dict else ["verify"]
 
-        return jwk_dict if as_dict else _rust_json_dumps(jwk_dict)
+        return jwk_dict if as_dict else rust_lib.json_dumps(jwk_dict)
 
 
     @staticmethod
@@ -682,11 +670,11 @@ class ECAlgorithm(Algorithm):
     
 
     def sign(self, msg, key): 
-        return bytes(_rust_raw_sign(msg, key, self.alg))
+        return bytes(rust_lib.raw_sign(msg, key, self.alg))
 
 
     def verify(self, msg, key, sig): 
-        return _rust_raw_verify(msg, bytes(sig), key, self.alg)
+        return rust_lib.raw_verify(msg, bytes(sig), key, self.alg)
 
 
     @staticmethod
@@ -712,8 +700,8 @@ class ECAlgorithm(Algorithm):
 
 class OKPAlgorithm(Algorithm):
 
-    def sign(self, msg, key): return bytes(_rust_raw_sign(msg, key, "EdDSA"))
-    def verify(self, msg, key, sig): return _rust_raw_verify(msg, bytes(sig), key, "EdDSA")
+    def sign(self, msg, key): return bytes(rust_lib.raw_sign(msg, key, "EdDSA"))
+    def verify(self, msg, key, sig): return rust_lib.raw_verify(msg, bytes(sig), key, "EdDSA")
 
 
     @staticmethod
@@ -760,44 +748,28 @@ def get_default_algorithms():
     return default_algorithms
 
     
-## -- Epilogue - module hack pt. 2 - reassign our python variants back to the main module
+## -- Epilogue - module wiring 
 
-rust_lib.encode = encode
-rust_lib.decode = decode
-rust_lib.decode_complete = decode_complete
-rust_lib.encode_async = encode_async
-rust_lib.decode_async = decode_async
+sys.modules["webtoken.api_jwk"] = rust_lib.api_jwk
 
-rust_lib._validate_iss = _validate_iss
-rust_lib.json_loads = _rust_json_loads
-rust_lib.json_dumps = _rust_json_dumps
+rust_lib.api_jws.PyJWS = PyJWS
+sys.modules["webtoken.api_jws"] = rust_lib.api_jws
 
-rust_lib.PyJWT = PyJWT
-
-rust_lib.PyJWKError = rust_lib.api_jwk.PyJWKError
-rust_lib.PyJWKSetError = rust_lib.api_jwk.PyJWKSetError
-
-rust_lib.PyJWS = PyJWS
-api_jws = types.ModuleType("webtoken.api_jws")
-api_jws.PyJWS = PyJWS
+algs = rust_lib.algorithms
+algs.Algorithm = Algorithm
+algs.NoneAlgorithm = NoneAlgorithm
+algs.HMACAlgorithm = HMACAlgorithm
+algs.RSAAlgorithm = RSAAlgorithm
+algs.ECAlgorithm = ECAlgorithm
+algs.RSAPSSAlgorithm = RSAPSSAlgorithm 
+algs.OKPAlgorithm = OKPAlgorithm
+algs.get_default_algorithms = get_default_algorithms
+sys.modules["webtoken.algorithms"] = algs
 
 curves = types.ModuleType("webtoken.curves")
 curves.SECP256R1 = SECP256R1
 curves.SECP384R1 = SECP384R1
 curves.SECP521R1 = SECP521R1
 curves.SECP256K1 = SECP256K1
-
-algorithms = types.ModuleType("webtoken.algorithms")
-rust_lib.algorithms = algorithms
-algorithms.Algorithm = Algorithm
-algorithms.NoneAlgorithm = NoneAlgorithm
-algorithms.HMACAlgorithm = HMACAlgorithm
-algorithms.RSAAlgorithm = RSAAlgorithm
-algorithms.ECAlgorithm = ECAlgorithm
-algorithms.RSAPSSAlgorithm = RSAPSSAlgorithm 
-algorithms.OKPAlgorithm = OKPAlgorithm
-algorithms.get_default_algorithms = get_default_algorithms
-
-sys.modules["webtoken.api_jws"] = api_jws
-sys.modules["webtoken.algorithms"] = algorithms
 sys.modules["webtoken.curves"] = curves
+
