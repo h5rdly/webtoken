@@ -35,7 +35,9 @@ See (and suggest!) more benchmarks under [benchmarks](https://github.com/h5rdly/
 
 `pip install webtoken`
 
-Developed on Linux / Python 3.13, currently can't attest to other platforms.
+- Developed on Linux / Python 3.13
+- Wheels available for Linux (+ Alpine) / Windows / MacOS 
+- sdist for FreeBSD
 
 ##  Usage
 
@@ -80,7 +82,6 @@ The crypto backend used by webtoken is [aws-lc-rs](https://github.com/aws/aws-lc
 
 ### Supported algorithms
 
-Via jsonwebtoken - 
 - HS256
 - HS384
 - HS512
@@ -88,6 +89,8 @@ Via jsonwebtoken -
 - RS384
 - RS512-
 - ES512
+
+Beside PyJWT compatible algos, webtoken can also use - 
 - ES256K
 - ML-DSA-65
 
