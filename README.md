@@ -105,6 +105,7 @@ The crypto backend used by webtoken is [aws-lc-rs](https://github.com/aws/aws-lc
 
 ### Supported algorithms
 
+PyJWT compat - 
 - HS256
 - HS384
 - HS512
@@ -113,7 +114,7 @@ The crypto backend used by webtoken is [aws-lc-rs](https://github.com/aws/aws-lc
 - RS512-
 - ES512
 
-Beside PyJWT compatible algos, webtoken can also use - 
+Also - 
 - ES256K
 - ML-DSA-65
 
