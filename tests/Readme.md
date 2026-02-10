@@ -1,6 +1,6 @@
 ## Tests
 
-The major [PyJWT test suites](https://github.com/jpadilla/pyjwt/blob/master/tests/test_api_jwk.py) were ported - 
+The major [PyJWT test suites](https://github.com/jpadilla/pyjwt/tree/master/tests) were ported - 
 - test_api_jwt.py
 - test_api_jws.py
 - test_api_jwk.py

@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  # --- 1. Linux (Glibc - Ubuntu, Debian, CentOS, Fedora) ---
+  ## -- Linux + Glibc - Ubuntu, Debian, CentOS, Fedora
   linux:
     runs-on: ubuntu-latest
     strategy:
@@ -34,7 +34,7 @@ jobs:
           name: wheels-linux-${{ matrix.target }}
           path: dist
 
-  # --- 2. Linux (Musl - Alpine) ---
+  ## -- Linux + Musl - Alpine 
   musllinux:
     runs-on: ubuntu-latest
     strategy:
@@ -58,7 +58,7 @@ jobs:
           name: wheels-musl-${{ matrix.target }}
           path: dist
 
-  # --- 3. Windows ---
+  ## -- Windows 
   windows:
     runs-on: windows-latest
     steps:
@@ -84,7 +84,7 @@ jobs:
           name: wheels-windows
           path: dist
 
-  # --- 4. macOS (Intel + Apple Silicon) ---
+  ## -- macOS (Intel + Apple Silicon) 
   macos:
     runs-on: macos-latest
     strategy:
@@ -107,7 +107,7 @@ jobs:
           name: wheels-macos-${{ matrix.target }}
           path: dist
 
-  # --- 5. The Source Distribution (The FreeBSD Fix) ---
+  ## -- Source Distribution - FreeBSD
   sdist:
     runs-on: ubuntu-latest
     steps:
@@ -123,7 +123,7 @@ jobs:
           name: wheels-sdist
           path: dist
 
-  # --- 6. Publish to PyPI ---
+  ## -- PyPI 
   release:
     name: Release
     runs-on: ubuntu-latest

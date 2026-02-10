@@ -6,7 +6,7 @@
 
 ##  Size
 
-The Rust `.so` file on linux is ~3.7Mb, no external dependencies.
+The `.so` size on linux is ~3.7Mb, no external dependencies.
 
 ##  Speed
 
@@ -29,17 +29,19 @@ ES512
 Enc: 1.9x | Dec: 1.5x
 ```
 
-See (and suggest!) more benchmarks under [benchmarks](https://github.com/h5rdly/toke/blob/main/benchmarks/)
+See and suggest more benchmarks under [benchmarks](https://github.com/h5rdly/toke/blob/main/benchmarks/).
 
 ##  Installation
 
 `pip install webtoken`
 
-Developed on Linux / Python 3.13, currently can't attest to other platforms.
+- Developed on Linux / Python 3.13
+- Wheels available for Linux (+ Alpine) / Windows / MacOS 
+- `sdist` for FreeBSD
 
 ##  Usage
 
-1. PyJWT Style (Drop-in Replacement)
+#### PyJWT Style (Drop-in Replacement)
 
 ```python
 import webtoken as jwt
@@ -53,9 +55,7 @@ print(decoded)
 # {'sub': '1234567890', 'name': 'John Doe', 'iat': 1516239022}
 ```
 
-2. webtoken style - in design
-
-3. Asyncio variants
+#### Asyncio variants
 
 ```python
 import webtoken as wt
@@ -70,31 +70,51 @@ decoded = await wt.decode_async(token, "secret", algorithms=["HS256"])
 print(decoded)
 # {'name': 'Bob'}
 ```
+#### Crypto / base64 complementary utils
+
+Since webtoken already has aws-lc-rs in its standalone module, it exposes several auxiliary utilities.
+
+This, for example, allows running tests, such as the PyJWT ported test suites, without importing cryptography.
+
+```python
+import webtoken as wt
+
+
+wt.base64url_encode('bob')    # utf8 strings or bytes
+# b'Ym9i'
+
+wt.base64url_decode(b'Ym9i').decode()
+# 'bob'
+
+wt.random_bytes(7)       # cryptographically secure random bytes 
+# b'j>A\x0cj\xac\x7f'
+
+priv, pub = wt.generate_key_pair('rs256')
+# pub = b'-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhki.......a2ODLeYTResxi\nnQIDAQAB\n-----END PUBLIC KEY-----\n'
+
+```
 
 ##  Compatibility
 
-Effort is made to make toke as compatible as possible with [PyJWT](https://github.com/jpadilla/pyjwt). To that effect, changes are made to make the relevant tests from the extensive PyJWT [test suite](https://github.com/jpadilla/pyjwt/tree/master/tests) pass. 
+Effort is made to make toke as compatible as possible with [PyJWT](https://github.com/jpadilla/pyjwt). For compatibility details, See the readme under [tests](https://github.com/h5rdly/webtoken/tree/main/tests). 
 
 ##  Crypto
 
-Toke is backed by [jsonwebtoken](https://github.com/Keats/jsonwebtoken) and [aws-lc-rs](https://github.com/aws/aws-lc-rs).
+The crypto backend used by webtoken is [aws-lc-rs](https://github.com/aws/aws-lc-rs).
 
 
 ### Supported algorithms
 
-Via jsonwebtoken - 
+PyJWT compat - 
 - HS256
 - HS384
 - HS512
 - RS256
 - RS384
-- RS512
-
-Via aws-lc-rs - 
+- RS512-
 - ES512
+
+Also - 
 - ES256K
 - ML-DSA-65
 
-##  Fun Facts
-
-- Using the Rust Crypto backend with jsonwebtoken made the binary around ~1Mb on linux. However, RSA decoding was slower than using PyJWT. Thus, we switched to aws-lc-rs.  
