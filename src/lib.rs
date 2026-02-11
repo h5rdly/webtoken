@@ -139,6 +139,19 @@ impl From<WebtokenError> for PyErr {
 }
 
 
+fn raise_missing_claim_error<T>(py: Python, claim: &str) -> PyResult<T> {
+
+    let m = PyModule::import(py, "webtoken")?;
+    let exc_class = m.getattr("MissingRequiredClaimError")?;
+    
+    // triggers python __init__ which does the formatting
+    let exc_instance = exc_class.call1((claim,))?;
+
+    Err(PyErr::from_value(exc_instance))
+}
+
+
+
 // --- Algorithm Registry ---
 
 static ALGORITHM_REGISTRY: OnceLock<RwLock<HashMap<String, Py<PyAny>>>> = OnceLock::new();
@@ -225,45 +238,6 @@ fn load_jwk_set(data: &Bound<'_, PyAny>) -> PyResult<PyJWKSet> {
     crate::pyjwt_jwk_api::from_jwk_set(data)
 }
 
-
-// fn map_curve_name_for_error(name: &str) -> &str {
-//     match name {
-//         "P-256" => "secp256r1",
-//         "P-384" => "secp384r1",
-//         "P-521" => "secp521r1",
-//         "P-192" => "secp192r1",
-//         _ => name
-//     }
-// }
-
-// #[pyfunction]
-// #[pyo3(signature = (key, expected_kty, expected_crv=None))]
-// fn validate_key_properties(key: &PyJWK, expected_kty: &str, expected_crv: Option<&str>) -> PyResult<()> {
-//     // 1. Validate Key Type (kty)
-//     let kty = key.inner.get("kty").and_then(|v| v.as_str()).unwrap_or("");
-//     if kty != expected_kty {
-//         // e.g. "Invalid key type: RSA. Expected EC."
-//         return Err(InvalidKeyError::new_err(format!("Invalid key type: {}. Expected {}.", kty, expected_kty)));
-//     }
-    
-//     // 2. Validate Curve (crv) if expected
-//     if let Some(req_crv) = expected_crv {
-//         let crv = key.inner.get("crv").and_then(|v| v.as_str())
-//             .ok_or_else(|| InvalidKeyError::new_err(format!("{} key missing 'crv'", expected_kty)))?;
-        
-//         if crv != req_crv {
-//             // Use the mapping helper to generate the specific error message PyJWT tests expect
-//             let mapped_actual = map_curve_name_for_error(crv);
-//             let mapped_expected = map_curve_name_for_error(req_crv);
-            
-//             return Err(InvalidKeyError::new_err(format!(
-//                 "Key curve {} does not match algorithm curve {}.", 
-//                 mapped_actual, mapped_expected
-//             )));
-//         }
-//     }
-//     Ok(())
-// }
 
 #[pyfunction]
 pub fn register_algorithm(name: &str, provider: Py<PyAny>) {
@@ -689,7 +663,9 @@ fn validate_claims_content(
                 }
             } else {
                 if token_aud_val.is_none() || token_aud_val == Some(&Value::Null) {
-                    return Err(WebtokenError::Custom{ exc: "MissingRequiredClaimError".into(), msg: "Missing required claim: aud".into() });
+                    return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(
+                        jsonwebtoken::errors::ErrorKind::MissingRequiredClaim("aud".to_string())
+                    )));
                 }
                 let token_auds: Vec<String> = match token_aud_val {
                     Some(Value::String(s)) => vec![s.clone()],
@@ -712,7 +688,9 @@ fn validate_claims_content(
              let is_truthy = match val { Value::Null => false, Value::String(s) => !s.is_empty(), Value::Array(a) => !a.is_empty(), Value::Bool(b) => *b, _ => true, };
              if is_truthy { return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::InvalidAudience))); }
         } else if validation.required_spec_claims.contains("aud") {
-             return Err(WebtokenError::Custom{ exc: "MissingRequiredClaimError".into(), msg: "Missing required claim: aud".into() });
+            return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(
+                 jsonwebtoken::errors::ErrorKind::MissingRequiredClaim("aud".to_string())
+             )));
         }
     }
 
@@ -999,10 +977,22 @@ fn decode_complete<'py>(
         match key { Some(k) => Some(get_decoding_key(k, &alg_str, check_length)?), None => return Err(PyValueError::new_err("Key required")) }
     } else { None };
 
-    let result = py.detach(move || {
-        decode_complete_impl(token_final, decoding_key, validation, effective_verify, check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud, expected_aud, expected_iss, subject, content, return_dict)
-    }).map_err(PyErr::from)?;
-    pythonize(py, &result).map_err(|e| PyValueError::new_err(e.to_string()))
+    let result = py.detach(move || {decode_complete_impl(
+        token_final, decoding_key, validation, effective_verify, check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud, expected_aud, expected_iss, subject, content, return_dict)
+    });
+    
+    match result {
+        Ok(val) => pythonize(py, &val).map_err(|e| PyValueError::new_err(e.to_string())),
+        Err(e) => {
+             if let WebtokenError::Jwt(ref jwt_err) = e {
+                 if let jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(claim) = jwt_err.kind() {
+                     return raise_missing_claim_error(py, claim);
+                 }
+             }
+             Err(e.into())
+        }
+    }
+
 }
 
 
@@ -1057,8 +1047,7 @@ fn encode(
     let key_bytes = get_key_bytes(key, algorithm, true, check_length)?;
     let detached = header_map.get("b64") == Some(&Value::Bool(false));
 
-    jws::sign_output(&signing_input, &header_b64, &payload_b64, &key_bytes, algorithm, detached)
-        .map_err(Into::into)
+    jws::sign_output(&signing_input, &header_b64, &payload_b64, &key_bytes, algorithm, detached).map_err(Into::into)
 }
 
 
@@ -1137,7 +1126,8 @@ fn pem_to_jwk(pem: &[u8]) -> PyResult<String> {
 
 #[pyfunction]
 #[pyo3(signature = (claims, options=None, audience=None, issuer=None, subject=None, verify=true, leeway=0.0))]
-fn validate_claims(
+fn validate_claims<'py>(
+    py: Python<'py>,
     claims: &Bound<'_, PyAny>,
     options: Option<&Bound<'_, PyDict>>,
     audience: Option<&Bound<'_, PyAny>>,
@@ -1157,12 +1147,22 @@ fn validate_claims(
 
     let (expected_aud, expected_iss) = extract_aud_iss(audience, issuer)?;
 
-
-    validate_claims_content(
-        &claims_val, &validation, 
-        check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud,
+    let result = validate_claims_content(
+        &claims_val, &validation, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud,
         &expected_aud, &expected_iss, &subject
-    ).map_err(Into::into)
+    );
+
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => {
+             if let WebtokenError::Jwt(ref jwt_err) = e {
+                 if let jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(claim) = jwt_err.kind() {
+                     return raise_missing_claim_error(py, claim);
+                 }
+             }
+            Err(e.into())
+        }
+    }
 }
 
 

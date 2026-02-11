@@ -54,6 +54,13 @@ InvalidKeyError = rust_lib.InvalidKeyError
 rust_lib.InsecureKeyLengthWarning = InsecureKeyLengthWarning
 rust_lib.RemovedInPyjwt3Warning = RemovedInPyjwt3Warning
 
+
+class MissingRequiredClaimError(InvalidTokenError):
+    def __init__(self, claim):
+        self.claim = claim
+        super().__init__(f'Token is missing the "{claim}" claim')
+
+
 ## --  JWT Helpers
 
 def _merge_options(default_options: dict | None, options: dict | None, kwargs: dict) -> dict:

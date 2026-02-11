@@ -1,4 +1,4 @@
-name: Build and Release
+name: Release
 
 on:
   push:
@@ -10,131 +10,90 @@ permissions:
   contents: read
 
 jobs:
-  ## -- Linux + Glibc - Ubuntu, Debian, CentOS, Fedora
-  linux:
-    runs-on: ubuntu-latest
+  build_wheels:
+    name: Build wheels (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        target: [x86_64]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - name: Build manylinux wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
-          sccache: 'true'
-          manylinux: auto
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-${{ matrix.target }}
-          path: dist
+        include:
+          # Linux Glibc x86
+          - name: Linux x86
+            os: ubuntu-latest
+            target: x86_64
+            manylinux: auto
 
-  ## -- Linux + Musl - Alpine 
-  musllinux:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [x86_64, aarch64]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - name: Build musllinux wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
-          sccache: 'true'
-          manylinux: musllinux_1_2 # Targeting Alpine
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-musl-${{ matrix.target }}
-          path: dist
+          # Musl x86
+          - name: Musl x86
+            os: ubuntu-latest
+            target: x86_64
+            manylinux: musllinux_1_2
 
-  ## -- Windows 
-  windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-          architecture: x64
-      - uses: actions/setup-go@v4
-        with:
-          go-version: '1.20'
-      - name: Install NASM
-        uses: ilammy/setup-nasm@v1
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: x64
-          args: --release --out dist --find-interpreter
-          sccache: 'true'
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-windows
-          path: dist
+          # Linux Glibc ARM64
+          - name: Linux ARM64
+            os: ubuntu-latest
+            target: aarch64
+            manylinux: auto
 
-  ## -- macOS (Intel + Apple Silicon) 
-  macos:
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        target: [x86_64, aarch64]
+          # MacOS (Universal / x86 + ARM)
+          - name: MacOS
+            os: macos-latest
+            target: x86_64
+            manylinux: auto 
+
+          # Windows
+          - name: Windows
+            os: windows-latest
+            target: x64
+            manylinux: auto 
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
+      - uses: actions/checkout@v6
+      
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
           args: --release --out dist --find-interpreter
           sccache: 'true'
+      
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: wheels-macos-${{ matrix.target }}
+          name: wheels-${{ matrix.name }}
           path: dist
 
-  ## -- Source Distribution - FreeBSD
-  sdist:
+  build_sdist:
+    name: Build source distribution
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: --out dist
       - name: Upload sdist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: wheels-sdist
           path: dist
 
-  ## -- PyPI 
-  release:
-    name: Release
+  publish:
+    name: Publish to PyPI
+    needs: [build_wheels, build_sdist]
     runs-on: ubuntu-latest
-    if: "startsWith(github.ref, 'refs/tags/')"
-    needs: [linux, musllinux, windows, macos, sdist]
     steps:
-      - uses: actions/download-artifact@v4
-      - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
-        env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+      - uses: actions/download-artifact@v6
         with:
-          command: upload
-          args: --non-interactive --skip-existing wheels-*/*
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Publish to PyPI
+        run: uv publish dist/*
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
