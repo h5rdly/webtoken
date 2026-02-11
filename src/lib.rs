@@ -1166,13 +1166,27 @@ fn validate_claims<'py>(
 }
 
 
+#[derive(FromPyObject)]
+pub enum PemInput {
+    #[pyo3(transparent)]
+    Str(String),
+    #[pyo3(transparent)]
+    Bytes(Vec<u8>),
+}
+
+
 #[pyfunction]
-fn load_key_from_pem(pem: &[u8]) -> PyResult<PyJWK> {
-    let json_str = crate::jwk::pem_to_jwk(pem).map_err(|e| PyValueError::new_err(e))?;
+fn load_key_from_pem(key_data: PemInput) -> PyResult<PyJWK> {
+
+    let pem_bytes = match key_data {PemInput::Str(s) => s.into_bytes(), PemInput::Bytes(b) => b};
+
+    let json_str = jwk::pem_to_jwk(&pem_bytes).map_err(|e| PyValueError::new_err(e))?;
     let val: serde_json::Value = from_str(&json_str).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let alg = val.get("alg").and_then(|s| s.as_str()).map(|s| s.to_string());
+    
     Ok(PyJWK { inner: val, algorithm_name: alg })
 }
+
 
 // Register a submodule and add it to sys.modules 
 fn add_submodule_with_sys(
