@@ -3,7 +3,7 @@ import sys
 import pytest
 
 # Ensure we can import the local webtoken module
-sys.path.append(__file__.rsplit("/", 2)[0])
+sys.path.append(__file__.replace('\\', '/').rsplit("/", 2)[0])
 import webtoken
 
 from webtoken import InvalidKeyError, PyJWKSetError, PyJWKError

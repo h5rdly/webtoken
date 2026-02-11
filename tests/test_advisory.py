@@ -1,6 +1,6 @@
 import sys
 
-sys.path.append(__file__.rsplit("/", 2)[0])
+sys.path.append(__file__.replace('\\', '/').rsplit("/", 2)[0])
 
 import webtoken as jwt
 from webtoken.algorithms import get_default_algorithms

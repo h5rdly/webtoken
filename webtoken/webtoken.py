@@ -21,7 +21,7 @@ def _load_rust_pip_or_dev(_rust_lib_name: str = '_webtoken', module_dev_path: st
 
     rust_lib = None
 
-    for file in os.listdir(__file__.rsplit('/', 1)[0]):
+    for file in os.listdir(__file__.replace('\\', '/').rsplit('/', 1)[0]):
         if file.startswith(f'lib{_rust_lib_name}') and file.endswith((".so", ".pyd", ".dylib", 'dll')):
             rust_lib = _load_module(_rust_lib_name, f'{py_dir}/{file}')
             break

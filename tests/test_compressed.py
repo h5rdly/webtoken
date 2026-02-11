@@ -1,7 +1,7 @@
 import json, zlib, sys
 
 import sys
-sys.path.append(__file__.rsplit("/", 2)[0])
+sys.path.append(__file__.replace('\\', '/').rsplit("/", 2)[0])
 
 from webtoken import PyJWT
 
