@@ -57,11 +57,12 @@ print(decoded)
 
 #### Asyncio variants
 
+The rust based encode/decode release the GIL.
+
+You can send them away on asyncio.to_thread(), or use the provided wrappers.
+
 ```python
 import webtoken as wt
-
-# The rust based encode/decode release the GIL
-# You can send them away on asyncio.to_thread(), or use the provided wrappers
 
 payload = {"name": "Bob"}
 token = await wt.encode_async(payload, "secret", algorithm="HS256")
