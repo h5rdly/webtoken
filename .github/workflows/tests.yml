@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  # -- Standard OS (Linux, Windows, MacOS) --
+  # Linux, Windows, MacOS
   test-standard:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -42,7 +42,7 @@ jobs:
       - name: Run tests
         run: pytest tests
 
-  # -- Alpine Linux (Musl) --
+  # Alpine Linux (Musl) 
   test-alpine:
     name: Test (Alpine/Musl)
     runs-on: ubuntu-latest
@@ -55,7 +55,6 @@ jobs:
       - name: Install dependencies
         run: pip install maturin pytest
       
-      # [FIX] Same fix here
       - name: Build and install
         run: |
           maturin build --release
@@ -64,7 +63,7 @@ jobs:
       - name: Run tests
         run: pytest tests
 
-  # -- FreeBSD --
+  # FreeBSD 
   test-freebsd:
     name: Test (FreeBSD)
     runs-on: ubuntu-latest
@@ -80,7 +79,6 @@ jobs:
             . venv/bin/activate
             pip install maturin pytest
             
-            # [FIX] Same fix here
             maturin build --release
             pip install target/wheels/*.whl
             
