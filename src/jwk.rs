@@ -1,11 +1,9 @@
 use serde_json::{Value, json};
 use base64::{engine::general_purpose::{URL_SAFE_NO_PAD, STANDARD}, Engine as _};
 use num_bigint::BigUint;
-use jsonwebtoken::{Algorithm, EncodingKey, DecodingKey};
-use jsonwebtoken::jwk::{Jwk as RustJwk};
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 
-use crate::{WebtokenError, is_hmac};
+use crate::{WebtokenError};
 use crate::crypto::{recover_primes, compute_crt};
 
 
@@ -14,7 +12,7 @@ const OID_P256: &[u8] = &[0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 
 const OID_P384: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22];
 const OID_P521: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x23];
 const OID_SECP256K1: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x0A];
-
+const OID_RSA_ENCRYPTION: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
 
 pub struct RsaPrivateComponents {
     pub n: BigUint, pub e: BigUint, pub d: BigUint,
@@ -26,25 +24,6 @@ fn get_biguint(jwk: &Value, field: &str) -> Result<BigUint, WebtokenError> {
         .ok_or_else(|| WebtokenError::Generic(format!("Missing '{}'", field)))?;
     let bytes = b64_to_bytes(s)?;
     Ok(BigUint::from_bytes_be(&bytes))
-}
-
-fn pad_left(bytes: Vec<u8>, len: usize) -> Vec<u8> {
-    if bytes.len() < len {
-        let mut out = vec![0u8; len - bytes.len()];
-        out.extend_from_slice(&bytes);
-        return out;
-    }
-    bytes
-}
-
-fn get_oid_for_curve(crv: &str) -> Result<&'static [u8], WebtokenError> {
-    match crv {
-        "P-256" => Ok(&[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]),
-        "P-384" => Ok(&[0x2b, 0x81, 0x04, 0x00, 0x22]),
-        "P-521" => Ok(&[0x2b, 0x81, 0x04, 0x00, 0x23]),
-        "secp256k1" => Ok(&[0x2b, 0x81, 0x04, 0x00, 0x0a]),
-        _ => Err(WebtokenError::Generic(format!("Unsupported curve for DER encoding: {}", crv))),
-    }
 }
 
 
@@ -151,25 +130,6 @@ fn validate_ec_coordinates(jwk: &Value) -> Result<(), String> {
 }
 
 
-fn validate_curve(jwk: &Value, alg: Algorithm) -> Result<(), WebtokenError> {
-    if let Some("EC") = jwk.get("kty").and_then(|v| v.as_str()) {
-        let crv = jwk.get("crv").and_then(|v| v.as_str()).unwrap_or("");
-        let expected_crv = match alg {
-            Algorithm::ES256 => "P-256",
-            Algorithm::ES384 => "P-384",
-            _ => return Ok(()),
-        };
-        if crv != expected_crv {
-            return Err(WebtokenError::Custom { 
-                exc: "InvalidKeyError".to_string(), 
-                msg: format!("Curve mismatch. Algorithm {:?} expects curve {}, but key uses {}.", alg, expected_crv, crv)
-            });
-        }
-    }
-    Ok(())
-}
-
-
 pub fn normalize(jwk: Value, algorithm_hint: Option<String>) -> Result<(Value, Option<String>), String> {
     if !jwk.is_object() { return Err("JWK must be an object".to_string()); }
     if jwk.get("kty").is_none() { return Err("Key type (kty) not found".to_string()); }
@@ -199,10 +159,11 @@ pub fn deduce_algorithm(jwk: &Value) -> Result<Option<String>, String> {
                 "P-384" => Ok(Some("ES384".to_string())),
                 "P-521" => Ok(Some("ES512".to_string())),
                 "secp256k1" => Ok(Some("ES256K".to_string())),
+                "P-192" => Ok(None), // to be caught for a proper error message
                 _ => Err(format!("Unsupported crv: {}", crv))
             }
         },
-        "RSA" => Ok(Some("RS256".to_string())),
+        "RSA" => Ok(None),
         "oct" => Ok(Some("HS256".to_string())),
         "OKP" => {
              let crv = jwk.get("crv").and_then(|v| v.as_str()).ok_or("crv missing for OKP")?;
@@ -213,20 +174,6 @@ pub fn deduce_algorithm(jwk: &Value) -> Result<Option<String>, String> {
         },
         other => Err(format!("Unknown key type: {}", other))
     }
-}
-
-
-pub fn to_decoding_key(jwk: &Value) -> Result<DecodingKey, WebtokenError> {
-    let json_str = serde_json::to_string(jwk).map_err(|e| WebtokenError::Generic(e.to_string()))?;
-    let rust_jwk: RustJwk = serde_json::from_str(&json_str)
-        .map_err(|e| WebtokenError::Generic(format!("JWK parsing failed: {}", e)))?;
-    DecodingKey::from_jwk(&rust_jwk).map_err(WebtokenError::Jwt)
-}
-
-
-pub fn create_decoding_key(jwk: &Value, alg: Algorithm) -> Result<DecodingKey, WebtokenError> {
-    validate_curve(jwk, alg)?;
-    to_decoding_key(jwk)
 }
 
 
@@ -242,181 +189,6 @@ pub fn get_rsa_bits_from_value(inner: &Value) -> Option<usize> {
     }
     None
 }
-
-
-pub fn create_encoding_key(jwk: &Value, alg: Algorithm) -> Result<EncodingKey, WebtokenError> {
-    validate_curve(jwk, alg)?;
-
-    // ... (HMAC / RSA / EC logic kept as is) ...
-    if is_hmac(alg) {
-        let k = jwk.get("k").and_then(|v| v.as_str())
-            .ok_or_else(|| WebtokenError::Generic("Missing 'k' for HMAC".into()))?;
-        let bytes = URL_SAFE_NO_PAD.decode(k)
-            .map_err(|_| WebtokenError::Generic("Invalid base64 'k'".into()))?;
-        return Ok(EncodingKey::from_secret(&bytes));
-    }
-
-    match alg {
-        Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 |
-        Algorithm::PS256 | Algorithm::PS384 | Algorithm::PS512 => {
-             // ... (RSA logic unchanged) ...
-             if let (Some(n), Some(e), Some(d), Some(p), Some(q), Some(dp), Some(dq), Some(qi)) = (
-                jwk.get("n").and_then(|v| v.as_str()), jwk.get("e").and_then(|v| v.as_str()),
-                jwk.get("d").and_then(|v| v.as_str()), jwk.get("p").and_then(|v| v.as_str()),
-                jwk.get("q").and_then(|v| v.as_str()), jwk.get("dp").and_then(|v| v.as_str()),
-                jwk.get("dq").and_then(|v| v.as_str()), jwk.get("qi").and_then(|v| v.as_str())
-            ) {
-                let mut seq_content = Vec::new();
-                encode_der_int(&mut seq_content, &[0]);
-                encode_der_int(&mut seq_content, &b64_to_bytes(n)?);
-                encode_der_int(&mut seq_content, &b64_to_bytes(e)?);
-                encode_der_int(&mut seq_content, &b64_to_bytes(d)?);
-                encode_der_int(&mut seq_content, &b64_to_bytes(p)?);
-                encode_der_int(&mut seq_content, &b64_to_bytes(q)?);
-                encode_der_int(&mut seq_content, &b64_to_bytes(dp)?);
-                encode_der_int(&mut seq_content, &b64_to_bytes(dq)?);
-                encode_der_int(&mut seq_content, &b64_to_bytes(qi)?);
-
-                let mut der = Vec::new();
-                der.push(0x30); 
-                encode_der_len(&mut der, seq_content.len());
-                der.extend_from_slice(&seq_content);
-                return Ok(EncodingKey::from_rsa_der(&der));
-            }
-        }
-        Algorithm::ES256 | Algorithm::ES384 => {
-             // ... (EC logic unchanged) ...
-             let d_b64 = jwk.get("d").and_then(|v| v.as_str())
-                 .ok_or_else(|| WebtokenError::Generic("Missing 'd' for EC signing key".into()))?;
-             let d_raw = b64_to_bytes(d_b64)?;
-
-             let (crv, expected_len) = match alg {
-                 Algorithm::ES256 => ("P-256", 32),
-                 Algorithm::ES384 => ("P-384", 48),
-                 _ => unreachable!(),
-             };
-             
-             let d_bytes = pad_left(d_raw, expected_len);
-             let oid_bytes = get_oid_for_curve(crv)?;
-
-             let mut inner_seq = Vec::new();
-             encode_der_int(&mut inner_seq, &[1]); 
-             inner_seq.push(0x04); 
-             encode_der_len(&mut inner_seq, d_bytes.len());
-             inner_seq.extend_from_slice(&d_bytes);
-
-             if let (Some(x_b64), Some(y_b64)) = (jwk.get("x").and_then(|s| s.as_str()), jwk.get("y").and_then(|s| s.as_str())) {
-                 let x_raw = b64_to_bytes(x_b64)?;
-                 let y_raw = b64_to_bytes(y_b64)?;
-                 let x_bytes = pad_left(x_raw, expected_len);
-                 let y_bytes = pad_left(y_raw, expected_len);
-                 let mut pub_key_bytes = vec![0x04]; 
-                 pub_key_bytes.extend_from_slice(&x_bytes);
-                 pub_key_bytes.extend_from_slice(&y_bytes);
-                 let mut bit_string = vec![0x00]; 
-                 bit_string.extend_from_slice(&pub_key_bytes);
-                 let mut pub_tag_content = Vec::new();
-                 pub_tag_content.push(0x03); 
-                 encode_der_len(&mut pub_tag_content, bit_string.len());
-                 pub_tag_content.extend_from_slice(&bit_string);
-                 inner_seq.push(0xA1); 
-                 encode_der_len(&mut inner_seq, pub_tag_content.len());
-                 inner_seq.extend_from_slice(&pub_tag_content);
-             }
-
-             let mut sec1_der = Vec::new();
-             sec1_der.push(0x30);
-             encode_der_len(&mut sec1_der, inner_seq.len());
-             sec1_der.extend_from_slice(&inner_seq);
-
-             let mut alg_id_seq = Vec::new();
-             let id_ec_public_key = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
-             let mut oid_part = Vec::new();
-             oid_part.push(0x06); encode_der_len(&mut oid_part, id_ec_public_key.len()); oid_part.extend_from_slice(&id_ec_public_key);
-             let mut param_part = Vec::new();
-             param_part.push(0x06); encode_der_len(&mut param_part, oid_bytes.len()); param_part.extend_from_slice(oid_bytes);
-             alg_id_seq.push(0x30);
-             encode_der_len(&mut alg_id_seq, oid_part.len() + param_part.len());
-             alg_id_seq.extend_from_slice(&oid_part);
-             alg_id_seq.extend_from_slice(&param_part);
-             let mut pkcs8_seq = Vec::new();
-             encode_der_int(&mut pkcs8_seq, &[0]); 
-             pkcs8_seq.extend_from_slice(&alg_id_seq);
-             pkcs8_seq.push(0x04); 
-             encode_der_len(&mut pkcs8_seq, sec1_der.len());
-             pkcs8_seq.extend_from_slice(&sec1_der);
-             let mut final_der = Vec::new();
-             final_der.push(0x30);
-             encode_der_len(&mut final_der, pkcs8_seq.len());
-             final_der.extend_from_slice(&pkcs8_seq);
-             return Ok(EncodingKey::from_ec_der(&final_der));
-        }
-        _ => {}
-    }
-
-    match alg {
-        Algorithm::EdDSA => {
-             let kty = jwk.get("kty").and_then(|v| v.as_str()).ok_or_else(|| WebtokenError::Generic("Missing kty".into()))?;
-             if kty != "OKP" { return Err(WebtokenError::Generic("EdDSA requires OKP kty".into())); }
-             
-             let crv = jwk.get("crv").and_then(|v| v.as_str()).ok_or_else(|| WebtokenError::Generic("Missing crv".into()))?;
-             
-             if crv != "Ed25519" && crv != "Ed448" { 
-                 return Err(WebtokenError::Generic("Only Ed25519 and Ed448 are supported for EdDSA".into())); 
-             }
-
-             let d_b64 = jwk.get("d").and_then(|v| v.as_str())
-                 .ok_or_else(|| WebtokenError::Generic("Missing 'd' for OKP signing key".into()))?;
-             let d_raw = b64_to_bytes(d_b64)?;
-
-             // [DEBUG] Print key details
-
-             let mut algo_seq = Vec::new();
-             let oid_ed25519 = [0x2b, 0x65, 0x70]; // 1.3.101.112
-             let oid_ed448 = [0x2b, 0x65, 0x71];   // 1.3.101.113 (Ed448)
-
-             algo_seq.push(0x06); // OID tag
-             
-             if crv == "Ed25519" {
-                 encode_der_len(&mut algo_seq, oid_ed25519.len());
-                 algo_seq.extend_from_slice(&oid_ed25519);
-             } else {
-                 encode_der_len(&mut algo_seq, oid_ed448.len());
-                 algo_seq.extend_from_slice(&oid_ed448);
-             }
-             
-             let mut algo_wrap = Vec::new();
-             algo_wrap.push(0x30);
-             encode_der_len(&mut algo_wrap, algo_seq.len());
-             algo_wrap.extend_from_slice(&algo_seq);
-
-             let mut inner_octet = Vec::new();
-             inner_octet.push(0x04);
-             encode_der_len(&mut inner_octet, d_raw.len());
-             inner_octet.extend_from_slice(&d_raw);
-
-             let mut pkcs8_content = Vec::new();
-             encode_der_int(&mut pkcs8_content, &[0]); // Version
-             pkcs8_content.extend_from_slice(&algo_wrap);
-             pkcs8_content.push(0x04); // OCTET STRING tag for privateKey
-             encode_der_len(&mut pkcs8_content, inner_octet.len());
-             pkcs8_content.extend_from_slice(&inner_octet);
-
-             let mut final_der = Vec::new();
-             final_der.push(0x30); // Sequence
-             encode_der_len(&mut final_der, pkcs8_content.len());
-             final_der.extend_from_slice(&pkcs8_content);
-
-             //  (Mental check: Sequence(Version, AlgoID(OID), PrivateKey(OctetString(OctetString(KeyBytes))))
-             
-             return Ok(EncodingKey::from_ed_der(&final_der));
-        }
-        _ => {}
-    }
-
-    Err(WebtokenError::Generic(format!("Signing via JWK object not fully supported for {:?}", alg)))
-}
-
 
 
 struct DerReader<'a> { input: &'a [u8] }
@@ -723,7 +495,6 @@ pub fn extract_key_bytes(jwk: &Value, public_only: bool) -> Result<Vec<u8>, Stri
             URL_SAFE_NO_PAD.decode(k).map_err(|e| format!("Invalid base64 k: {}", e))
         },
         "OKP" => {
-            // If verifying (public_only), prioritize x. If signing, prioritize d.
             if !public_only {
                 if let Some(d) = jwk.get("d").and_then(|v| v.as_str()) {
                      return URL_SAFE_NO_PAD.decode(d).map_err(|e| format!("Invalid base64 d: {}", e));
@@ -736,12 +507,10 @@ pub fn extract_key_bytes(jwk: &Value, public_only: bool) -> Result<Vec<u8>, Stri
             }
         },
         "EC" => {
-             // 1. Private Key (d) -> Construct PKCS#8 DER
-             // [CHANGE] Only return private key if public_only is FALSE
+             // ... (Existing EC logic matches previous provided code)
              if !public_only {
                  if let Some(d) = jwk.get("d").and_then(|v| v.as_str()) {
                      let d_bytes = URL_SAFE_NO_PAD.decode(d).map_err(|e| format!("Invalid d: {}", e))?;
-                     
                      let crv = jwk.get("crv").and_then(|v| v.as_str()).ok_or("Missing crv")?;
                      let curve_oid = match crv {
                          "P-256" => OID_P256,
@@ -750,28 +519,20 @@ pub fn extract_key_bytes(jwk: &Value, public_only: bool) -> Result<Vec<u8>, Stri
                          "secp256k1" => OID_SECP256K1,
                          _ => return Err(format!("Unsupported curve: {}", crv)),
                      };
-
-                     // --- Construct SEC1 (EC Private Key) ---
                      let mut sec1 = Vec::new();
-                     sec1.extend_from_slice(&[0x02, 0x01, 0x01]); // Version 1
-                     sec1.push(0x04); // Octet String tag
+                     sec1.extend_from_slice(&[0x02, 0x01, 0x01]); 
+                     sec1.push(0x04); 
                      encode_len(d_bytes.len(), &mut sec1);
                      sec1.extend_from_slice(&d_bytes);
-                     // Parameters [0]
                      sec1.push(0xA0); 
                      encode_len(curve_oid.len(), &mut sec1);
                      sec1.extend_from_slice(curve_oid);
                      
-                     // Optional: Public Key [1] (BIT STRING)
-                     // If we have x/y, we *could* add it, but usually optional in SEC1 for private keys.
-                     // aws-lc-rs is happy with just 'd' and 'oid'.
-
                      let mut sec1_seq = Vec::new();
                      sec1_seq.push(0x30); 
                      encode_len(sec1.len(), &mut sec1_seq);
                      sec1_seq.extend_from_slice(&sec1);
 
-                     // --- Construct PKCS#8 ---
                      let mut alg_id = Vec::new();
                      alg_id.extend_from_slice(OID_EC_PUBLIC_KEY);
                      alg_id.extend_from_slice(curve_oid);
@@ -782,9 +543,9 @@ pub fn extract_key_bytes(jwk: &Value, public_only: bool) -> Result<Vec<u8>, Stri
                      alg_seq.extend_from_slice(&alg_id);
 
                      let mut pkcs8_inner = Vec::new();
-                     pkcs8_inner.extend_from_slice(&[0x02, 0x01, 0x00]); // Version 0
+                     pkcs8_inner.extend_from_slice(&[0x02, 0x01, 0x00]); 
                      pkcs8_inner.extend_from_slice(&alg_seq);
-                     pkcs8_inner.push(0x04); // Octet String
+                     pkcs8_inner.push(0x04); 
                      encode_len(sec1_seq.len(), &mut pkcs8_inner);
                      pkcs8_inner.extend_from_slice(&sec1_seq);
 
@@ -792,48 +553,90 @@ pub fn extract_key_bytes(jwk: &Value, public_only: bool) -> Result<Vec<u8>, Stri
                      pkcs8.push(0x30);
                      encode_len(pkcs8_inner.len(), &mut pkcs8);
                      pkcs8.extend_from_slice(&pkcs8_inner);
-
                      return Ok(pkcs8);
                  }
              }
-
-             // 2. Public Key (x, y) -> Uncompressed Point (0x04 || x || y)
-             if let (Some(x_b64), Some(y_b64)) = (
-                 jwk.get("x").and_then(|v| v.as_str()),
-                 jwk.get("y").and_then(|v| v.as_str())
-             ) {
+             if let (Some(x_b64), Some(y_b64)) = (jwk.get("x").and_then(|v| v.as_str()), jwk.get("y").and_then(|v| v.as_str())) {
                  let x_bytes = URL_SAFE_NO_PAD.decode(x_b64).map_err(|e| format!("Invalid x: {}", e))?;
                  let y_bytes = URL_SAFE_NO_PAD.decode(y_b64).map_err(|e| format!("Invalid y: {}", e))?;
-                 
                  let mut out = Vec::with_capacity(1 + x_bytes.len() + y_bytes.len());
                  out.push(0x04); 
                  out.extend_from_slice(&x_bytes);
                  out.extend_from_slice(&y_bytes);
                  return Ok(out);
              }
-             
              Err("Missing parameters for EC".to_string())
         },
-        // ... RSA ...
         "RSA" => {
-             // ... existing RSA logic ...
-             // (Ensure you copy the RSA implementation from previous context if not preserved)
-             let n_b64 = jwk.get("n").and_then(|v| v.as_str()).ok_or("Missing n")?;
-             let e_b64 = jwk.get("e").and_then(|v| v.as_str()).ok_or("Missing e")?;
-             let _n_bytes = URL_SAFE_NO_PAD.decode(n_b64).map_err(|e| format!("Invalid n: {}", e))?;
-             let _e_bytes = URL_SAFE_NO_PAD.decode(e_b64).map_err(|e| format!("Invalid e: {}", e))?;
-             
-             // This is naive DER encoding for RSA public key parts, sufficient for the use case?
-             // Actually, aws-lc-rs verification usually expects full PKCS#1 RSAPublicKey structure.
-             // But let's assume your previous RSA logic was working or you rely on jsonwebtoken fallback for RSA.
-             // For safety, let's keep the stub or your working implementation.
-             
-             // Minimal DER sequence of (n, e)
-             // ... (Your previous implementation) ...
-             
-             // NOTE: Since you rely on jsonwebtoken for RSA, this might only be hit if you add RSA to ExternalAlgorithm.
-             // Currently RSA is commented out in ExternalAlgorithm, so this block might not be critical yet.
-             Ok(vec![]) 
+             // [FIX] Implemented RSA DER Encoding
+             let n = get_biguint(jwk, "n").map_err(|e| e.to_string())?;
+             let e = get_biguint(jwk, "e").map_err(|e| e.to_string())?;
+
+             if !public_only && jwk.get("d").is_some() {
+                 // Private Key -> PKCS#1 (RsaPrivateKey)
+                 // Sequence(version, n, e, d, p, q, dp, dq, qi)
+                 let comps = extract_or_recover_rsa_components(jwk).map_err(|e| e.to_string())?;
+                 
+                 let mut seq = Vec::new();
+                 encode_der_int(&mut seq, &[0]); // version = 0
+                 encode_der_int(&mut seq, &comps.n.to_bytes_be());
+                 encode_der_int(&mut seq, &comps.e.to_bytes_be());
+                 encode_der_int(&mut seq, &comps.d.to_bytes_be());
+                 encode_der_int(&mut seq, &comps.p.to_bytes_be());
+                 encode_der_int(&mut seq, &comps.q.to_bytes_be());
+                 encode_der_int(&mut seq, &comps.dp.to_bytes_be());
+                 encode_der_int(&mut seq, &comps.dq.to_bytes_be());
+                 encode_der_int(&mut seq, &comps.qi.to_bytes_be());
+
+                 let mut der = Vec::new();
+                 der.push(0x30); // SEQUENCE
+                 encode_der_len(&mut der, seq.len());
+                 der.extend_from_slice(&seq);
+                 return Ok(der);
+             } else {
+                 // Public Key -> SPKI (SubjectPublicKeyInfo)
+                 // This is required for aws-lc-rs verification
+                 // Sequence(AlgoID, BitString(PKCS1_RSAPublicKey))
+                 
+                 // 1. Build PKCS#1 RSAPublicKey: Sequence(n, e)
+                 let mut pkcs1_seq = Vec::new();
+                 encode_der_int(&mut pkcs1_seq, &n.to_bytes_be());
+                 encode_der_int(&mut pkcs1_seq, &e.to_bytes_be());
+                 
+                 let mut pkcs1 = Vec::new();
+                 pkcs1.push(0x30);
+                 encode_der_len(&mut pkcs1, pkcs1_seq.len());
+                 pkcs1.extend_from_slice(&pkcs1_seq);
+
+                 // 2. Algo Identifier (rsaEncryption): Sequence(OID, Null)
+                 let mut algo_seq = Vec::new();
+                 algo_seq.push(0x06); // OID
+                 encode_der_len(&mut algo_seq, OID_RSA_ENCRYPTION.len());
+                 algo_seq.extend_from_slice(OID_RSA_ENCRYPTION);
+                 algo_seq.push(0x05); // NULL
+                 algo_seq.push(0x00);
+
+                 let mut algo_wrap = Vec::new();
+                 algo_wrap.push(0x30);
+                 encode_der_len(&mut algo_wrap, algo_seq.len());
+                 algo_wrap.extend_from_slice(&algo_seq);
+
+                 // 3. BitString wrapper
+                 let mut bit_string = Vec::new();
+                 bit_string.push(0x03); // BIT STRING
+                 encode_der_len(&mut bit_string, pkcs1.len() + 1);
+                 bit_string.push(0x00); // Unused bits
+                 bit_string.extend_from_slice(&pkcs1);
+
+                 // 4. Final Sequence
+                 let mut spki = Vec::new();
+                 spki.push(0x30);
+                 encode_der_len(&mut spki, algo_wrap.len() + bit_string.len());
+                 spki.extend_from_slice(&algo_wrap);
+                 spki.extend_from_slice(&bit_string);
+                 
+                 return Ok(spki);
+             }
         }
         _ => Err(format!("Unsupported key type for raw extraction: {}", kty))
     }

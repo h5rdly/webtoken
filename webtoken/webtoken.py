@@ -454,9 +454,9 @@ class Algorithm:
                 # Fast Rust PEM parsing
                 json_str = rust_lib.pem_to_jwk(key_bytes)
                 return rust_lib.load_jwk(json_str)
-            except Exception:
+            except Exception as e:
                 raise rust_lib.InvalidKeyError("Could not parse the provided public key.")
-        
+                
         raise TypeError("Key must be PyJWK, bytes, or string")
 
 
@@ -683,11 +683,21 @@ class ECAlgorithm(Algorithm):
     
 
     def sign(self, msg, key): 
-        return bytes(rust_lib.raw_sign(msg, key, self.alg))
+
+        alg = self.alg
+        if isinstance(key, PyJWK) and key.algorithm_name and key.algorithm_name.startswith("ES"):
+            alg = key.algorithm_name
+
+        return bytes(rust_lib.raw_sign(msg, key, alg))
 
 
     def verify(self, msg, key, sig): 
-        return rust_lib.raw_verify(msg, bytes(sig), key, self.alg)
+
+        alg = self.alg
+        if isinstance(key, PyJWK) and key.algorithm_name and key.algorithm_name.startswith("ES"):
+            alg = key.algorithm_name
+
+        return rust_lib.raw_verify(msg, bytes(sig), key, alg)
 
 
     @staticmethod

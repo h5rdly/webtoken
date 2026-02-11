@@ -1,17 +1,14 @@
-use std::str::{FromStr, from_utf8};
+use std::str::{from_utf8};
 use std::collections::{HashSet, HashMap};
 use std::sync::{OnceLock, RwLock};
 
-use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation, 
-};
-
-use serde_json::{from_str, from_slice, to_vec, Value, Map, map::Entry};
+use serde_json::{from_slice, from_str, to_vec, Value, Map, map::Entry};
 use serde::{Serialize, Deserialize};
-use base64::{Engine as _, engine::general_purpose::{URL_SAFE_NO_PAD, STANDARD}};
+use base64::{Engine as _, engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}};
 use time::{OffsetDateTime, PrimitiveDateTime};
 
 use pyo3::prelude::*;
-use pyo3::exceptions::{PyTypeError, PyValueError, PyNotImplementedError};
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::types::{PyBytes, PyDict, PyModule, PyString};
 use pyo3::{wrap_pyfunction}; 
 use pythonize::{depythonize, pythonize};
@@ -23,7 +20,7 @@ mod jws;
 mod py_utils;
 pub mod pyjwt_jwk_api;
 
-use algorithms::{ExternalAlgorithm, perform_signature, perform_verification};
+use algorithms::{perform_signature, perform_verification};
 use py_utils::decode_base64_permissive;
 use pyjwt_jwk_api::{PyJWK, PyJWKSet, perform_signature_jwk, perform_verification_jwk, 
     validate_key_properties, check_rsa_key_length};
@@ -62,11 +59,39 @@ struct PartialHeader {
     alg: String,
 }
 
+// [FIX] Local Error Enum (Replaces jsonwebtoken::errors::Error)
 #[derive(Debug)]
 pub enum WebtokenError {
-    Jwt(jsonwebtoken::errors::Error),
     Generic(String),
     Custom { exc: String, msg: String },
+    
+    // Standard JWT Errors
+    InvalidSignature,
+    ExpiredSignature,
+    ImmatureSignature,
+    InvalidIssuer,
+    InvalidAudience,
+    InvalidAlgorithm,
+    MissingRequiredClaim(String),
+    DecodeError(String),
+}
+
+// [FIX] Local Validation Struct (Replaces jsonwebtoken::Validation)
+#[derive(Debug, Clone)]
+pub struct Validation {
+    pub leeway: u64,
+    pub required_spec_claims: HashSet<String>,
+    pub algorithms: Vec<String>,
+}
+
+impl Default for Validation {
+    fn default() -> Self {
+        Self {
+            leeway: 0,
+            required_spec_claims: HashSet::new(),
+            algorithms: vec!["HS256".to_string()],
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -84,17 +109,29 @@ struct CompleteToken {
     signature: Vec<u8>,
 }
 
+#[derive(Deserialize)]
+struct LenientHeader {
+    alg: String,
+}
+
 impl std::fmt::Display for WebtokenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WebtokenError::Jwt(e) => write!(f, "{}", e),
             WebtokenError::Generic(s) => write!(f, "{}", s),
             WebtokenError::Custom { exc, msg } => write!(f, "{}: {}", exc, msg),
+            WebtokenError::DecodeError(msg) => write!(f, "DecodeError: {}", msg),
+            WebtokenError::InvalidSignature => write!(f, "Signature verification failed"),
+            WebtokenError::ExpiredSignature => write!(f, "Signature has expired"),
+            WebtokenError::ImmatureSignature => write!(f, "The token is not yet valid"),
+            WebtokenError::InvalidIssuer => write!(f, "Invalid issuer"),
+            WebtokenError::InvalidAudience => write!(f, "Invalid audience"),
+            WebtokenError::InvalidAlgorithm => write!(f, "Algorithm not supported"),
+            WebtokenError::MissingRequiredClaim(c) => write!(f, "Missing required claim: {}", c),
         }
     }
 }
 
-
+// [FIX] Updated From<WebtokenError> mapping
 impl From<WebtokenError> for PyErr {
     fn from(err: WebtokenError) -> PyErr {
         match err {
@@ -116,40 +153,25 @@ impl From<WebtokenError> for PyErr {
                     _ => PyJWTError::new_err(msg),
                 }
             },
-            WebtokenError::Jwt(jwt_err) => {
-                use jsonwebtoken::errors::ErrorKind;
-                let msg = jwt_err.to_string();
-                if msg.starts_with("JSON error") { return DecodeError::new_err(msg); }
-                match jwt_err.kind() {
-                    ErrorKind::ExpiredSignature => ExpiredSignatureError::new_err(msg),
-                    ErrorKind::InvalidToken => DecodeError::new_err(msg),
-                    ErrorKind::InvalidSignature => InvalidSignatureError::new_err("Signature verification failed"),
-                    ErrorKind::InvalidAudience => InvalidAudienceError::new_err(msg),
-                    ErrorKind::InvalidIssuer => InvalidIssuerError::new_err(msg),
-                    ErrorKind::ImmatureSignature => ImmatureSignatureError::new_err(msg),
-                    ErrorKind::MissingRequiredClaim(_) => MissingRequiredClaimError::new_err(msg),
-                    ErrorKind::InvalidSubject => InvalidSubjectError::new_err("Invalid subject"),
-                    ErrorKind::InvalidAlgorithm => InvalidAlgorithmError::new_err(msg),
-                    
-                    _ => PyJWTError::new_err(msg),
-                }
-            }
+            WebtokenError::DecodeError(msg) => DecodeError::new_err(msg),
+            WebtokenError::InvalidSignature => InvalidSignatureError::new_err("Signature verification failed"),
+            WebtokenError::ExpiredSignature => ExpiredSignatureError::new_err("Signature has expired"),
+            WebtokenError::ImmatureSignature => ImmatureSignatureError::new_err("The token is not yet valid (iat/nbf)"),
+            WebtokenError::InvalidIssuer => InvalidIssuerError::new_err("Invalid issuer"),
+            WebtokenError::InvalidAudience => InvalidAudienceError::new_err("Invalid audience"),
+            WebtokenError::InvalidAlgorithm => InvalidAlgorithmError::new_err("Algorithm not supported"),
+            WebtokenError::MissingRequiredClaim(c) => MissingRequiredClaimError::new_err(c),
         }
     }
 }
 
 
 fn raise_missing_claim_error<T>(py: Python, claim: &str) -> PyResult<T> {
-
     let m = PyModule::import(py, "webtoken")?;
     let exc_class = m.getattr("MissingRequiredClaimError")?;
-    
-    // triggers python __init__ which does the formatting
     let exc_instance = exc_class.call1((claim,))?;
-
     Err(PyErr::from_value(exc_instance))
 }
-
 
 
 // --- Algorithm Registry ---
@@ -184,7 +206,6 @@ fn raw_verify(message: &[u8], signature: &[u8], key: &Bound<'_, PyAny>, algorith
         return perform_verification_jwk(message, signature, &jwk, algorithm).map_err(Into::into); 
     }
 
-    // [FIX] Always use perform_verification.
     perform_verification(message, signature, &key_bytes, algorithm)
         .map_err(|e| PyValueError::new_err(format!("{}", e)))
 }
@@ -262,10 +283,23 @@ pub fn get_algorithm(py: Python, name: &str) -> Option<Py<PyAny>> {
 
 // --- Helpers ---
 
-fn is_hmac(alg: Algorithm) -> bool {
-    matches!(alg, Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512)
+// [FIX] Simple string matching instead of jsonwebtoken Enum
+fn is_hmac(alg: &str) -> bool {
+    let s = alg.to_uppercase();
+    matches!(s.as_str(), "HS256" | "HS384" | "HS512")
 }
 
+// [FIX] Validate if algorithm is supported locally
+fn is_supported_algorithm(alg: &str) -> bool {
+    matches!(alg, 
+        "HS256" | "HS384" | "HS512" |
+        "RS256" | "RS384" | "RS512" |
+        "PS256" | "PS384" | "PS512" |
+        "ES256" | "ES384" | "ES512" | "ES521" | "ES256K" |
+        "EDDSA" | "ED25519" | "EdDSA" | "Ed25519" |
+        "ML-DSA-65"
+    )
+}
 
 fn sort_map(map: &mut Map<String, Value>) {
     let mut entries: Vec<(String, Value)> = std::mem::take(map).into_iter().collect();
@@ -333,94 +367,81 @@ fn extract_token_str(token: &Bound<'_, PyAny>) -> PyResult<String> {
 }
 
 
-fn get_key_bytes(key: &Bound<'_, PyAny>, alg_name: &str, is_signing: bool, check_length: bool) -> PyResult<Vec<u8>> {
+fn get_key_bytes(
+    key: &Bound<'_, PyAny>, 
+    alg_name: &str, 
+    is_signing: bool, 
+    check_length: bool
+) -> PyResult<Vec<u8>> {
 
-    if let Ok(jwk) = key.extract::<PyJWK>() { return jwk.to_key_bytes(!is_signing); }
-    if alg_name.eq_ignore_ascii_case("none") { return Ok(Vec::new()); }
+    // 1. Handle PyJWK Object
+    if let Ok(jwk) = key.extract::<PyJWK>() { 
+        if let Some(ref jwk_alg) = jwk.algorithm_name {
+            if jwk_alg.to_uppercase() != alg_name.to_uppercase() {
+                let msg = format!(
+                    "The specified key is for algorithm {} but the token is signed with {}.",
+                    jwk_alg, alg_name
+                );
+                if jwk_alg.starts_with("ES") && alg_name.starts_with("ES") {
+                    return Err(InvalidKeyError::new_err(msg));
+                }
+                return Err(InvalidAlgorithmError::new_err(msg));
+            }
+        }
+        return jwk.to_key_bytes(!is_signing); 
+    }
 
+    // 2. Handle 'none' algorithm
+    if alg_name.eq_ignore_ascii_case("none") { 
+        return Ok(Vec::new()); 
+    }
+
+    // 3. Extract Raw Bytes
     let key_slice = if let Ok(s) = key.cast::<PyString>() {
-    s.to_str()?.as_bytes()} else if let Ok(b) = key.cast::<PyBytes>() {b.as_bytes()} else {
+        s.to_str()?.as_bytes()
+    } else if let Ok(b) = key.cast::<PyBytes>() {
+        b.as_bytes()
+    } else {
         return Err(PyTypeError::new_err("Key must be string or bytes"));
     };
 
+    // 4. Handle PEM/SSH keys
     if let Ok(s) = from_utf8(key_slice) {
-        if s.starts_with("ssh-") || s.starts_with("ecdsa-") {
+        let s_trim = s.trim();
+        if s_trim.starts_with("ssh-") || s_trim.starts_with("ecdsa-") {
             if let Ok(pem) = crypto::ssh_to_pem(key_slice) {
                 return Ok(pem);
             }
         }
     }
     
-    if ExternalAlgorithm::from_str(alg_name).is_some() {
-        return Ok(key_slice.to_vec());
-    }
+    // [FIX] Validated against local string list instead of jsonwebtoken Algorithm enum
+    if is_supported_algorithm(alg_name) {
+        if is_hmac(alg_name) {
+            if bytes_look_like_public_key(key_slice) { 
+                return Err(InvalidKeyError::new_err("The specified key is an asymmetric key or x509 certificate and should not be used as an HMAC secret.")); 
+            }
 
-    let alg = Algorithm::from_str(alg_name).map_err(|_| PyNotImplementedError::new_err(format!("Algorithm '{}' not supported", alg_name)))?;
-    
-    if is_hmac(alg) {
-        if bytes_look_like_public_key(key_slice) { 
-            return Err(InvalidKeyError::new_err("The specified key is an asymmetric key... should not be used as an HMAC secret.")); 
-        }
-
-        if check_length {
-            let min_len = match alg {
-                Algorithm::HS256 => 32,
-                Algorithm::HS384 => 48,
-                Algorithm::HS512 => 64,
-                _ => 0,
-            };
-            if key_slice.len() < min_len {
-                return Err(InvalidKeyError::new_err(format!(
-                    "The specified key is {} bytes long, which is below the minimum recommended length of {} bytes.",
-                    key_slice.len(), min_len
-                )));
+            if check_length {
+                let min_len = match alg_name.to_uppercase().as_str() {
+                    "HS256" => 32,
+                    "HS384" => 48,
+                    "HS512" => 64,
+                    _ => 0,
+                };
+                if key_slice.len() < min_len {
+                    return Err(InvalidKeyError::new_err(format!(
+                        "The specified key is {} bytes long, which is below the minimum recommended length of {} bytes.",
+                        key_slice.len(), min_len
+                    )));
+                }
             }
         }
+    } else {
+        return Err(InvalidAlgorithmError::new_err(format!("Algorithm not supported")));
     }
 
     Ok(key_slice.to_vec())
-
-}
-
-
-fn get_decoding_key(key: &Bound<'_, PyAny>, alg_str: &str, check_length: bool) -> PyResult<DecodingKey> {
-    
-    // 1. Parse Algorithm first (needed for validation)
-    let alg = Algorithm::from_str(alg_str)
-        .map_err(|_| InvalidAlgorithmError::new_err("Algorithm not supported"))?;
-
-    // 2. Handle PyJWK (Pass alg for validation)
-    if let Ok(jwk) = key.extract::<PyJWK>() { 
-        return jwk.to_decoding_key(alg).map_err(PyErr::from); 
-    }
-
-    // 3. Handle Raw Bytes/PEM
-    let key_bytes = get_key_bytes(key, alg_str, false, false)?;
-    
-    if check_length && is_hmac(alg) {
-        let min_len = match alg {
-            Algorithm::HS256 => 32, Algorithm::HS384 => 48, Algorithm::HS512 => 64, _ => 0,
-        };
-        if key_bytes.len() < min_len {
-            return Err(InvalidKeyError::new_err(format!(
-                "The specified key is {} bytes long, which is below the minimum recommended length of {} bytes.",
-                key_bytes.len(), min_len
-            )));
-        }
-    }
-
-    let decoding_key = if is_hmac(alg) { DecodingKey::from_secret(&key_bytes) } else {
-        let try_ed = DecodingKey::from_ed_pem(&key_bytes);
-        if try_ed.is_ok() { try_ed.unwrap() } else {
-            let try_rsa = DecodingKey::from_rsa_pem(&key_bytes);
-            if try_rsa.is_ok() { try_rsa.unwrap() } else {
-                let try_ec = DecodingKey::from_ec_pem(&key_bytes);
-                if try_ec.is_ok() { try_ec.unwrap() } else { return Err(PyValueError::new_err("Invalid PEM key: could not parse as RSA, EC, or EdDSA")); }
-            }
-        }
-    };
-
-    Ok(decoding_key)
 }
 
 
@@ -545,14 +566,9 @@ fn prepare_validation(
 
     // Validation struct
     let alg_strs = algorithms.unwrap_or_else(|| vec!["HS256".to_string()]);
-    let mut standard_algs = Vec::new();
-    for s in &alg_strs {
-        if let Ok(a) = Algorithm::from_str(s) { standard_algs.push(a); }
-    }
-
-    let base_alg = standard_algs.first().cloned().unwrap_or(Algorithm::HS256);
-    let mut validation = Validation::new(base_alg);
-    if !standard_algs.is_empty() { validation.algorithms = standard_algs; } 
+    
+    let mut validation = Validation::default();
+    validation.algorithms = alg_strs;
 
     if leeway_arg > 0.0 {
         validation.leeway = leeway_arg as u64;
@@ -561,14 +577,6 @@ fn prepare_validation(
             validation.leeway = val.extract::<u64>()?;
         }
     } 
-    
-    // We do manual validation in validate_claims_content
-    validation.validate_exp = false; 
-    validation.validate_nbf = false; 
-    validation.validate_aud = false; 
-    validation.required_spec_claims.remove("exp"); 
-    validation.aud = None;
-    validation.iss = None;
 
     if let Some(opts) = options {
         if let Some(val) = opts.get_item("require")? {
@@ -610,11 +618,11 @@ fn validate_claims_content(
         if let Some(val) = claims.get("exp") {
             if let Some(exp) = get_numeric_date(val) {
                 if exp < (now - (validation.leeway as f64)) {
-                    return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::ExpiredSignature)));
+                    return Err(WebtokenError::ExpiredSignature);
                 }
             }
         } else if validation.required_spec_claims.contains("exp") {
-             return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::MissingRequiredClaim("exp".to_string()))));
+             return Err(WebtokenError::MissingRequiredClaim("exp".to_string()));
         }
     }
 
@@ -622,7 +630,7 @@ fn validate_claims_content(
         if let Some(val) = claims.get("nbf") {
             if let Some(nbf) = get_numeric_date(val) {
                 if nbf > (now + (validation.leeway as f64)) {
-                    return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::ImmatureSignature)));
+                    return Err(WebtokenError::ImmatureSignature);
                 }
             }
         }
@@ -633,15 +641,15 @@ fn validate_claims_content(
             let token_iss_val = claims.get("iss");
             match token_iss_val {
                 Some(Value::String(iss)) => {
-                    if !expected_issuers.contains(iss) { return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::InvalidIssuer))); }
+                    if !expected_issuers.contains(iss) { return Err(WebtokenError::InvalidIssuer); }
                 },
-                Some(_) => return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::InvalidIssuer))), 
-                None => { return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::MissingRequiredClaim("iss".to_string())))); }
+                Some(_) => return Err(WebtokenError::InvalidIssuer), 
+                None => { return Err(WebtokenError::MissingRequiredClaim("iss".to_string())); }
             }
         } else if claims.get("iss").is_none() && validation.required_spec_claims.contains("iss") {
-             return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::MissingRequiredClaim("iss".to_string()))));
+             return Err(WebtokenError::MissingRequiredClaim("iss".to_string()));
         } else if let Some(iss_val) = claims.get("iss") {
-             if !iss_val.is_string() { return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::InvalidIssuer))); }
+             if !iss_val.is_string() { return Err(WebtokenError::InvalidIssuer); }
         }
     }
 
@@ -663,9 +671,7 @@ fn validate_claims_content(
                 }
             } else {
                 if token_aud_val.is_none() || token_aud_val == Some(&Value::Null) {
-                    return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(
-                        jsonwebtoken::errors::ErrorKind::MissingRequiredClaim("aud".to_string())
-                    )));
+                    return Err(WebtokenError::MissingRequiredClaim("aud".to_string()));
                 }
                 let token_auds: Vec<String> = match token_aud_val {
                     Some(Value::String(s)) => vec![s.clone()],
@@ -681,16 +687,14 @@ fn validate_claims_content(
                     None => Vec::new(), 
                 };
                 if !token_auds.iter().any(|ta| expected_auds.contains(ta)) {
-                    return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::InvalidAudience)));
+                    return Err(WebtokenError::InvalidAudience);
                 }
             }
         } else if let Some(val) = token_aud_val {
              let is_truthy = match val { Value::Null => false, Value::String(s) => !s.is_empty(), Value::Array(a) => !a.is_empty(), Value::Bool(b) => *b, _ => true, };
-             if is_truthy { return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::InvalidAudience))); }
+             if is_truthy { return Err(WebtokenError::InvalidAudience); }
         } else if validation.required_spec_claims.contains("aud") {
-            return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(
-                 jsonwebtoken::errors::ErrorKind::MissingRequiredClaim("aud".to_string())
-             )));
+             return Err(WebtokenError::MissingRequiredClaim("aud".to_string()));
         }
     }
 
@@ -715,7 +719,7 @@ fn validate_claims_content(
     }
     
     for req in &validation.required_spec_claims {
-        if !claims.get(req).is_some() { return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(req.clone())))); }
+        if !claims.get(req).is_some() { return Err(WebtokenError::MissingRequiredClaim(req.clone())); }
     }
     Ok(())
 }
@@ -723,14 +727,14 @@ fn validate_claims_content(
 
 fn decode_impl(
     token: String,
-    decoding_key: Option<DecodingKey>, 
-    mut validation: Validation,
+    key_bytes: Option<Vec<u8>>,
+    validation: Validation,
     verify: bool,
     check_iat: bool,
     check_exp: bool, 
     check_nbf: bool, 
-    check_aud: bool,
-    check_iss: bool,
+    check_aud: bool, 
+    check_iss: bool, 
     check_sub: bool,
     strict_aud: bool,
     expected_aud: Option<HashSet<String>>,
@@ -759,14 +763,12 @@ fn decode_impl(
     if let Some(val) = header_val.get("b64") {
         if let Some(b) = val.as_bool() {
             if !b {
-                // If b64 is false, detached_payload is mandatory
                 if detached_content.is_none() {
                     return Err(WebtokenError::Custom { 
                         exc: "DecodeError".into(), 
                         msg: "It is required that you pass in a value for the \"detached_payload\" argument to decode a message having the b64 header set to false.".into() 
                     });
                 }
-                // Remove 'b64' so strict struct deserialization doesn't fail later
                 if let Some(obj) = header_val.as_object_mut() {
                     obj.remove("b64");
                 }
@@ -776,7 +778,6 @@ fn decode_impl(
         }
     }
 
-    // Check if 'alg' is present
     if header_val.get("alg").is_none() {
         return Err(WebtokenError::Custom { 
             exc: "InvalidAlgorithmError".into(), 
@@ -784,33 +785,33 @@ fn decode_impl(
         });
     }
 
-    // Now convert to strong Header struct
-    let header: Header = serde_json::from_value(header_val)
+    let header: LenientHeader = serde_json::from_value(header_val.clone())
         .map_err(|e| WebtokenError::Custom { exc: "DecodeError".into(), msg: format!("Invalid header string: {}", e) })?;
     
+    let alg_norm = header.alg.clone();
+
     if verify {
-       if !validation.algorithms.contains(&header.alg) {
-             return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(
-                 jsonwebtoken::errors::ErrorKind::InvalidAlgorithm
-             )));
+       if !is_supported_algorithm(&alg_norm) {
+            return Err(WebtokenError::InvalidAlgorithm);
+       }
+       if !validation.algorithms.iter().any(|a| a == &alg_norm) {
+             return Err(WebtokenError::InvalidAlgorithm);
         }
-        validation.algorithms = vec![header.alg.clone()];
     }
 
     let payload_bytes = decode_base64_permissive(parts[1].as_bytes())
         .map_err(|_| WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid payload padding".into() })?;
 
     if verify {
-        let key = decoding_key.ok_or_else(|| WebtokenError::Generic("Key required for verification".to_string()))?;
+        let key = key_bytes.ok_or_else(|| WebtokenError::Generic("Key required for verification".to_string()))?;
         let signature_bytes = decode_base64_permissive(parts[2].as_bytes())
             .map_err(|_| WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid crypto padding".into() })?;
         let signing_input = format!("{}.{}", parts[0], parts[1]);
-        let sig_b64 = URL_SAFE_NO_PAD.encode(&signature_bytes);
-        let valid = jsonwebtoken::crypto::verify(&sig_b64, &signing_input.as_bytes(), &key, header.alg)
-            .map_err(|e| WebtokenError::Jwt(e))?;
+        
+       let valid = algorithms::perform_verification(&signing_input.as_bytes(), &signature_bytes, &key, &alg_norm)?;
 
         if !valid {
-             return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::InvalidSignature)));
+             return Err(WebtokenError::InvalidSignature);
         }
     }
 
@@ -823,7 +824,6 @@ fn decode_impl(
         msg: "Invalid payload string: must be a json object".into() 
     })?;
 
-    // Must be a JSON Object (dict), not a number/string/list
     if !claims.is_object() {
         return Err(WebtokenError::Custom { 
             exc: "DecodeError".into(), 
@@ -838,7 +838,7 @@ fn decode_impl(
                 if let Some(iat) = get_numeric_date(val) {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as f64;
                     if iat > (now + (validation.leeway as f64)) {
-                        return Err(WebtokenError::Jwt(jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::ImmatureSignature)));
+                        return Err(WebtokenError::ImmatureSignature);
                     }
                 }
             }
@@ -851,7 +851,8 @@ fn decode_impl(
 
 fn decode_complete_impl(
     token: String, 
-    decoding_key: Option<DecodingKey>, 
+    // [CHANGED]
+    key_bytes: Option<Vec<u8>>, 
     validation: Validation, 
     verify: bool, 
     check_iat: bool, 
@@ -881,8 +882,6 @@ fn decode_complete_impl(
     if let Some(val) = header_val.get("b64") {
          if let Some(b) = val.as_bool() {
              if !b {
-                  // Only remove it, don't validate here (decode_impl will validate presence of content)
-                  // Or validate here too for safety
                   if detached_content.is_none() {
                        return Err(WebtokenError::Custom { 
                            exc: "DecodeError".into(), 
@@ -893,7 +892,7 @@ fn decode_complete_impl(
              }
          }
     }
-    let payload = decode_impl(token.clone(), decoding_key, validation, verify, check_iat, 
+    let payload = decode_impl(token.clone(), key_bytes, validation, verify, check_iat, 
     check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud, aud, iss, sub, detached_content, 
     convert_to_json)?;
     
@@ -935,7 +934,6 @@ fn decode_complete<'py>(
 
     if alg_str.eq_ignore_ascii_case("none") {
         if effective_verify {
-            // If verifying, 'none' is invalid because it cannot produce a signature check.
             return Err(DecodeError::new_err("Signature verification failed"));
         }
         // If verify=False, we proceed without checking the 'algorithms' list, as per PyJWT behavior
@@ -969,30 +967,29 @@ fn decode_complete<'py>(
     
     let (expected_aud, expected_iss) = extract_aud_iss(audience, issuer)?;
 
-    if ExternalAlgorithm::from_str(&alg_str).is_some() {
-        return Err(PyNotImplementedError::new_err("External algs need struct update in this snippet"));
-    }
-
-    let decoding_key = if effective_verify {
-        match key { Some(k) => Some(get_decoding_key(k, &alg_str, check_length)?), None => return Err(PyValueError::new_err("Key required")) }
+    let decoding_key_bytes = if effective_verify {
+        match key { 
+            Some(k) => Some(get_key_bytes(k, &alg_str, false, check_length)?), 
+            None => return Err(PyValueError::new_err("Key required")) 
+        }
     } else { None };
 
-    let result = py.detach(move || {decode_complete_impl(
-        token_final, decoding_key, validation, effective_verify, check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud, expected_aud, expected_iss, subject, content, return_dict)
+    let result = py.detach(move || {
+        decode_complete_impl(token_final, decoding_key_bytes, validation, effective_verify, check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud, expected_aud, expected_iss, subject, content, return_dict)
     });
-    
+
     match result {
-        Ok(val) => pythonize(py, &val).map_err(|e| PyValueError::new_err(e.to_string())),
+        Ok(val) => {
+            let py_obj = pythonize(py, &val).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok(py_obj) 
+        },
         Err(e) => {
-             if let WebtokenError::Jwt(ref jwt_err) = e {
-                 if let jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(claim) = jwt_err.kind() {
-                     return raise_missing_claim_error(py, claim);
-                 }
+             if let WebtokenError::MissingRequiredClaim(claim) = e {
+                 return raise_missing_claim_error(py, &claim);
              }
              Err(e.into())
         }
     }
-
 }
 
 
@@ -1118,6 +1115,14 @@ fn unsafe_peek<'py>(py: Python<'py>, token: &str) -> PyResult<Bound<'py, PyAny>>
     Ok(pythonize(py, &claims).unwrap())
 }
 
+#[derive(FromPyObject)]
+pub enum PemInput {
+    #[pyo3(transparent)]
+    Str(String),
+    #[pyo3(transparent)]
+    Bytes(Vec<u8>),
+}
+
 #[pyfunction]
 fn pem_to_jwk(pem: &[u8]) -> PyResult<String> {
     crate::jwk::pem_to_jwk(pem).map_err(|e| PyValueError::new_err(e))
@@ -1126,8 +1131,7 @@ fn pem_to_jwk(pem: &[u8]) -> PyResult<String> {
 
 #[pyfunction]
 #[pyo3(signature = (claims, options=None, audience=None, issuer=None, subject=None, verify=true, leeway=0.0))]
-fn validate_claims<'py>(
-    py: Python<'py>,
+fn validate_claims(
     claims: &Bound<'_, PyAny>,
     options: Option<&Bound<'_, PyDict>>,
     audience: Option<&Bound<'_, PyAny>>,
@@ -1155,38 +1159,24 @@ fn validate_claims<'py>(
     match result {
         Ok(_) => Ok(()),
         Err(e) => {
-             if let WebtokenError::Jwt(ref jwt_err) = e {
-                 if let jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(claim) = jwt_err.kind() {
-                     return raise_missing_claim_error(py, claim);
-                 }
-             }
             Err(e.into())
         }
     }
 }
 
 
-#[derive(FromPyObject)]
-pub enum PemInput {
-    #[pyo3(transparent)]
-    Str(String),
-    #[pyo3(transparent)]
-    Bytes(Vec<u8>),
-}
-
-
 #[pyfunction]
 fn load_key_from_pem(key_data: PemInput) -> PyResult<PyJWK> {
+    let pem_bytes = match key_data {
+        PemInput::Str(s) => s.into_bytes(),
+        PemInput::Bytes(b) => b,
+    };
 
-    let pem_bytes = match key_data {PemInput::Str(s) => s.into_bytes(), PemInput::Bytes(b) => b};
-
-    let json_str = jwk::pem_to_jwk(&pem_bytes).map_err(|e| PyValueError::new_err(e))?;
+    let json_str = crate::jwk::pem_to_jwk(&pem_bytes).map_err(|e| PyValueError::new_err(e))?;
     let val: serde_json::Value = from_str(&json_str).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let alg = val.get("alg").and_then(|s| s.as_str()).map(|s| s.to_string());
-    
     Ok(PyJWK { inner: val, algorithm_name: alg })
 }
-
 
 // Register a submodule and add it to sys.modules 
 fn add_submodule_with_sys(
@@ -1279,8 +1269,6 @@ fn _webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m_exc.add("InvalidKeyError", py.get_type::<InvalidKeyError>())?;
         Ok(())
     })?;
-
-    
 
     Ok(())
 }

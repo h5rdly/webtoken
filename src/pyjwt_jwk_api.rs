@@ -1,10 +1,9 @@
-use std::str::FromStr;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::Value; 
 use num_bigint::BigUint;
 
-use jsonwebtoken::{DecodingKey, Algorithm};
+// We still import Algorithm for parsing strings, but we don't need EncodingKey/DecodingKey/crypto anymore
 use pyo3::prelude::*;
 use pyo3::create_exception; 
 use pyo3::types::{PyDict, PyList, PyBytes, PyInt};
@@ -12,9 +11,9 @@ use pyo3::exceptions::{PyValueError, PyKeyError, PyTypeError};
 
 use pythonize::depythonize;
 
-use crate::{jwk, WebtokenError, PyJWTError, InvalidAlgorithmError, InvalidKeyError}; // Added InvalidKeyError
-use crate::algorithms::ExternalAlgorithm;
-use crate::jwk::{create_decoding_key, extract_or_recover_rsa_components};
+use crate::{jwk, WebtokenError, PyJWTError, InvalidKeyError}; 
+use crate::algorithms::Algorithm;
+use crate::jwk::{extract_or_recover_rsa_components};
 
 create_exception!(toke, PyJWKSetError, PyJWTError); 
 create_exception!(toke, PyJWKError, PyJWTError);
@@ -34,22 +33,6 @@ impl PyJWK {
     pub(crate) fn to_key_bytes(&self, public_only: bool) -> PyResult<Vec<u8>> {
         jwk::extract_key_bytes(&self.inner, public_only).map_err(PyValueError::new_err)
     }
-    
-    pub fn to_decoding_key(&self, expected_alg: Algorithm) -> PyResult<DecodingKey> {
-        if let Some(ref jwk_alg_str) = self.algorithm_name {
-            if let Ok(jwk_alg) = Algorithm::from_str(jwk_alg_str) {
-                if jwk_alg != expected_alg {
-                    return Err(InvalidAlgorithmError::new_err(format!(
-                        "The specified key is for algorithm {:?} but the token is signed with {:?}.",
-                        jwk_alg, expected_alg
-                    )));
-                }
-            }
-        }
-
-        jwk::create_decoding_key(&self.inner, expected_alg)
-            .map_err(Into::into)
-    }
 }
 
 
@@ -61,7 +44,9 @@ impl PyJWK {
     fn new(jwk_data: &Bound<'_, PyDict>, algorithm: Option<String>) -> PyResult<Self> {
         let raw: Value = depythonize(jwk_data)
             .map_err(|e| PyValueError::new_err(format!("Invalid JWK data: {}", e)))?;
-        let (inner, alg) = jwk::normalize(raw, algorithm).map_err(PyValueError::new_err)?;
+        
+        let (inner, alg) = jwk::normalize(raw, algorithm)
+            .map_err(|e| crate::InvalidKeyError::new_err(e))?;
 
         Ok(PyJWK { inner, algorithm_name: alg })
     }
@@ -71,7 +56,9 @@ impl PyJWK {
     #[pyo3(signature = (data, algorithm=None))]
     pub fn from_json(data: &str, algorithm: Option<String>) -> PyResult<Self> {
         let raw = jwk::parse_json(data).map_err(PyValueError::new_err)?;
-        let (inner, alg) = jwk::normalize(raw, algorithm).map_err(PyValueError::new_err)?;
+        
+        let (inner, alg) = jwk::normalize(raw, algorithm)
+            .map_err(|e| crate::InvalidKeyError::new_err(e))?;
 
         Ok(PyJWK { inner, algorithm_name: alg })
     }
@@ -96,7 +83,15 @@ impl PyJWK {
 
     #[getter]
     fn algorithm_name(&self) -> Option<String> {
-        self.algorithm_name.clone()
+        // [FIX] Compatibility: Default to RS256 for RSA keys if unspecified,
+        // matching PyJWT behavior, while keeping the internal field None for flexibility.
+        self.algorithm_name.clone().or_else(|| {
+            if let Ok("RSA") = self.key_type().as_deref() {
+                Some("RS256".to_string())
+            } else {
+                None
+            }
+        })
     }
 
     #[getter]
@@ -195,7 +190,7 @@ impl PyJWK {
         let kty = self.key_type()?;
 
         if kty == "RSA" {
-            let types = pyo3::types::PyModule::import(py, "types")?;             
+            let types = pyo3::types::PyModule::import(py, "types")?;              
             let sn = types.call_method0("SimpleNamespace")?;
              
              if let Some(n_b64) = self.inner.get("n").and_then(|v| v.as_str()) {
@@ -207,7 +202,7 @@ impl PyJWK {
              }
              if let Some(e_b64) = self.inner.get("e").and_then(|v| v.as_str()) {
                  let e_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(e_b64)
-                     .map_err(|_| PyValueError::new_err("Invalid e base64"))?;
+                      .map_err(|_| PyValueError::new_err("Invalid e base64"))?;
                  let int_cls = py.get_type::<pyo3::types::PyInt>();
                  let py_e = int_cls.call_method1("from_bytes", (e_bytes.as_slice(), "big"))?;
                  sn.setattr("e", py_e)?;
@@ -343,8 +338,8 @@ pub fn check_rsa_key_length(key: &Bound<'_, PyAny>) -> PyResult<Option<String>> 
         if let Some(kb) = key_bytes {
              if let Ok(json_str) = jwk::pem_to_jwk(&kb) {
                  if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
-                     // Call the helper in jwk.rs
-                     bit_len = jwk::get_rsa_bits_from_value(&val);
+                      // Call the helper in jwk.rs
+                      bit_len = jwk::get_rsa_bits_from_value(&val);
                  }
              }
         }
@@ -563,10 +558,17 @@ impl PyEllipticCurvePrivateNumbers {
 // --- Exposed Functions ---
 
 pub fn from_jwk(jwk: &Bound<'_, PyAny>, algorithm_hint: &str) -> PyResult<PyJWK> {
+    // [FIX] Treat empty string as None
+    let hint = if algorithm_hint.is_empty() { 
+        None 
+    } else { 
+        Some(algorithm_hint.to_string()) 
+    };
+
     if let Ok(s) = jwk.extract::<String>() {
-         PyJWK::from_json(&s, Some(algorithm_hint.to_string()))
+         PyJWK::from_json(&s, hint)
     } else if let Ok(d) = jwk.extract::<Bound<'_, PyDict>>() {
-         PyJWK::from_dict(&d, Some(algorithm_hint.to_string()))
+         PyJWK::from_dict(&d, hint)
     } else {
          Err(PyTypeError::new_err("Expected string or dict"))
     }
@@ -588,7 +590,6 @@ pub fn from_jwk_set(data: &Bound<'_, PyAny>) -> PyResult<PyJWKSet> {
 
 pub fn perform_signature_jwk(message: &[u8], key: &PyJWK, algorithm: &str) -> Result<Vec<u8>, WebtokenError> {
     
-    // [FIX] Auto-detect secp256k1 and override algorithm if necessary
     let mut alg_override = algorithm;
     if algorithm == "ES256" {
         if let Some(crv) = key.inner.get("crv").and_then(|v| v.as_str()) {
@@ -598,23 +599,17 @@ pub fn perform_signature_jwk(message: &[u8], key: &PyJWK, algorithm: &str) -> Re
         }
     }
 
-    if let Some(ext_alg) = ExternalAlgorithm::from_str(alg_override) {
-        // [FIX] Pass public_only=false for signing (we need the private key)
+    if let Ok(alg) = alg_override.parse::<Algorithm>() {
         let key_bytes = key.to_key_bytes(false).map_err(|e| WebtokenError::Generic(e.to_string()))?;
-        return ext_alg.sign(message, &key_bytes);
+        return alg.sign(message, &key_bytes);
     }
-
-    // Fallback to Standard
-    let alg = Algorithm::from_str(algorithm).map_err(|_| WebtokenError::Generic("Unsupported Algorithm".into()))?;
-    let enc_key = jwk::create_encoding_key(&key.inner, alg)?;
-    let sig = jsonwebtoken::crypto::sign(message, &enc_key, alg).map_err(|e| WebtokenError::Generic(e.to_string()))?;
-    URL_SAFE_NO_PAD.decode(&sig).map_err(|e| WebtokenError::Generic(e.to_string()))
+    
+    Err(WebtokenError::Generic(format!("Algorithm '{}' not supported (or key type mismatch)", algorithm)))
 }
 
 
 pub fn perform_verification_jwk(payload: &[u8], signature: &[u8], jwk: &PyJWK, alg_name: &str) -> Result<bool, WebtokenError> {
     
-    // [FIX] Auto-detect secp256k1 here too for safety
     let mut alg_override = alg_name;
     if alg_name == "ES256" {
         if let Some(crv) = jwk.inner.get("crv").and_then(|v| v.as_str()) {
@@ -624,16 +619,13 @@ pub fn perform_verification_jwk(payload: &[u8], signature: &[u8], jwk: &PyJWK, a
         }
     }
 
-    if let Some(ext_alg) = ExternalAlgorithm::from_str(alg_override) {
+    if let Ok(alg) = alg_override.parse::<Algorithm>() {
         // [FIX] Pass public_only=true for verification (extract x/y even if d exists)
         let bytes = jwk.to_key_bytes(true).map_err(|e| WebtokenError::Generic(e.to_string()))?;
-        return ext_alg.verify(payload, signature, &bytes);
+        return alg.verify(payload, signature, &bytes);
     }
-
-    let alg = Algorithm::from_str(alg_name).map_err(|_| WebtokenError::Generic(format!("Algorithm '{}' not supported", alg_name)))?;
-    let decoding_key = create_decoding_key(&jwk.inner, alg)?;
-    let sig_b64 = URL_SAFE_NO_PAD.encode(signature);
-    jsonwebtoken::crypto::verify(&sig_b64, payload, &decoding_key, alg).map_err(WebtokenError::Jwt)
+    
+    Err(WebtokenError::Generic(format!("Algorithm '{}' not supported (or key type mismatch)", alg_name)))
 }
 
 
