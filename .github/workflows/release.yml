@@ -16,38 +16,48 @@ jobs:
     strategy:
       matrix:
         include:
-          # Linux Glibc x86
+          # Linux x86 (Standard)
           - name: Linux x86
             os: ubuntu-latest
             target: x86_64
             manylinux: auto
+            qemu: false
 
-          # Musl x86
+          # Linux Musl (Alpine) - Great for lightweight Docker containers
           - name: Musl x86
             os: ubuntu-latest
             target: x86_64
             manylinux: musllinux_1_2
+            qemu: false
 
-          # Linux Glibc ARM64
+          # Linux ARM64 (AWS Graviton) - SLOW BUILD, remove if it fails again
           - name: Linux ARM64
             os: ubuntu-latest
             target: aarch64
             manylinux: auto
+            qemu: true
 
-          # MacOS (Universal / x86 + ARM)
+          # MacOS (Universal x86 + ARM)
           - name: MacOS
             os: macos-latest
             target: x86_64
-            manylinux: auto 
+            manylinux: auto # Field ignored by maturin for Mac
+            qemu: false
 
           # Windows
           - name: Windows
             os: windows-latest
             target: x64
-            manylinux: auto 
+            manylinux: auto # Field ignored by maturin for Windows
+            qemu: false
 
     steps:
       - uses: actions/checkout@v6
+      
+      # Required for ARM64 builds on Linux
+      - name: Set up QEMU
+        if: matrix.qemu
+        uses: docker/setup-qemu-action@v3
       
       - name: Build wheels
         uses: PyO3/maturin-action@v1
