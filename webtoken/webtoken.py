@@ -6,6 +6,7 @@ from collections.abc import Iterable
 ## -- Moudle loading helpers 
 
 def _load_module(module_name: str, path: str):
+    print(f'### Trying to load rust module from {path}')
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec and spec.loader:
         mod = importlib.util.module_from_spec(spec)
@@ -20,6 +21,11 @@ def _load_rust_pip_or_dev(_rust_lib_name: str = '_webtoken', module_dev_path: st
     module_dev_path = module_dev_path or _dev_path_linux
 
     rust_lib = None
+    try:
+        from . import _webtoken
+        rust_lib = _webtoken
+    except ImportError:
+        pass
 
     for file in os.listdir(__file__.replace('\\', '/').rsplit('/', 1)[0]):
         if file.startswith(f'lib{_rust_lib_name}') and file.endswith((".so", ".pyd", ".dylib", 'dll')):
