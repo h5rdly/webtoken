@@ -109,10 +109,10 @@ PyJWT compat -
 - HS512
 - RS256
 - RS384
-- RS512-
+- RS512
 - ES512
 
-Also - 
+As well as - 
 - ES256K
 - ML-DSA-65
 
