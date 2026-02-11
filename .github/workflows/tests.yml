@@ -9,8 +9,7 @@ permissions:
   contents: read
 
 jobs:
-
-  ## -- Linux, Windows, MacOS 
+  # -- Standard OS (Linux, Windows, MacOS) --
   test-standard:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -18,45 +17,54 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13']
+        python-version: ['3.12', '3.13', '3.14']
 
     steps:
       - uses: actions/checkout@v6
+
       - name: Set up Rust
         run: rustup update stable && rustup default stable
+
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      
-      - name: Install dependencies
+
+      - name: Install build dependencies
         run: pip install maturin pytest
 
-      - name: Build and Test
+      - name: Build and install
+        shell: bash
         run: |
-          maturin develop --release
-          pytest tests
+          maturin build --release
+          # Universal install command that works on Bash (Linux/Mac) and Git Bash (Windows)
+          pip install target/wheels/*.whl
 
-  ## -- Alpine (Musl) 
+      - name: Run tests
+        run: pytest tests
+
+  # -- Alpine Linux (Musl) --
   test-alpine:
     name: Test (Alpine/Musl)
     runs-on: ubuntu-latest
     container:
-      image: python:3.13-alpine # Python on Alpine comes with Musl
+      image: python:3.13-alpine
     steps:
       - uses: actions/checkout@v6
-      
       - name: Install Alpine build deps
         run: apk add --no-cache gcc musl-dev libffi-dev rust cargo openssl-dev git
-
       - name: Install dependencies
         run: pip install maturin pytest
-
-      - name: Build and Test
+      
+      # [FIX] Same fix here
+      - name: Build and install
         run: |
-          maturin develop --release
-          pytest tests
+          maturin build --release
+          pip install target/wheels/*.whl
+      
+      - name: Run tests
+        run: pytest tests
 
-  ## -- FreeBSD 
+  # -- FreeBSD --
   test-freebsd:
     name: Test (FreeBSD)
     runs-on: ubuntu-latest
@@ -66,13 +74,14 @@ jobs:
         uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
-          # Install Rust, Python, and git inside the VM
           prepare: pkg install -y rust python3 py311-pip git
           run: |
-            # Create a venv because FreeBSD system python is protected
             python3 -m venv venv
             . venv/bin/activate
-            
             pip install maturin pytest
-            maturin develop --release
+            
+            # [FIX] Same fix here
+            maturin build --release
+            pip install target/wheels/*.whl
+            
             pytest tests
