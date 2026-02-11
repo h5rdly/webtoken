@@ -86,12 +86,9 @@ wt.base64url_encode('bob')    # utf8 strings or bytes
 wt.base64url_decode(b'Ym9i').decode()
 # 'bob'
 
-wt.random_bytes(7)       # cryptographically secure random bytes 
-# b'j>A\x0cj\xac\x7f'
+rand_7 = wt.random_bytes(7)       # Get your cryptographically secure random bytes here 
 
-priv, pub = wt.generate_key_pair('rs256')
-# pub = b'-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhki.......a2ODLeYTResxi\nnQIDAQAB\n-----END PUBLIC KEY-----\n'
-
+priv, pub = wt.generate_key_pair('rs256')  
 ```
 
 ##  Compatibility
