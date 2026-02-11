@@ -57,9 +57,9 @@ print(decoded)
 
 #### Asyncio variants
 
-The rust based encode/decode release the GIL.
+- The rust based encode/decode release the GIL.
 
-You can send them away on asyncio.to_thread(), or use the provided wrappers.
+- You can send them away on asyncio.to_thread(), or use the provided wrappers.
 
 ```python
 import webtoken as wt
@@ -73,9 +73,9 @@ print(decoded)
 ```
 #### Crypto / base64 complementary utils
 
-Since webtoken already has aws-lc-rs in its standalone module, it exposes several auxiliary utilities.
+- Since webtoken already has aws-lc-rs in its standalone module, it exposes several auxiliary utilities.
 
-This, for example, allows running tests, such as the PyJWT ported test suites, without importing cryptography.
+- This, for example, allows running tests, such as the PyJWT ported test suites, without importing cryptography.
 
 ```python
 import webtoken as wt
