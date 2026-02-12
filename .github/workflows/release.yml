@@ -20,13 +20,11 @@ jobs:
             os: ubuntu-latest
             target: x86_64
             manylinux: auto
-            qemu: false
 
           - name: Musl x86
             os: ubuntu-latest
             target: x86_64
             manylinux: musllinux_1_2
-            qemu: false
 
           - name: Linux ARM64
             os: ubuntu-latest
@@ -37,14 +35,10 @@ jobs:
           - name: MacOS
             os: macos-latest
             target: x86_64
-            manylinux: auto
-            qemu: false
 
           - name: Windows
             os: windows-latest
             target: x64
-            manylinux: auto
-            qemu: false
 
     steps:
       - uses: actions/checkout@v6
