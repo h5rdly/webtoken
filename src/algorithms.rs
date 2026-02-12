@@ -166,25 +166,22 @@ fn sign_ecdsa(
     alg_name: &str
 ) -> Result<Vec<u8>, WebtokenError> {
 
-    // 1. Parse PEM/DER Key
     let key_pair = EcdsaKeyPair::from_pkcs8(alg, key_bytes)
         .map_err(|e| WebtokenError::Custom { 
             exc: "InvalidKeyError".into(), 
             msg: format!("Invalid {} private key (expected PKCS#8): {:?}", alg_name, e) 
         })?;
     
-    // 2. Initialize Randomness
     let rng = SystemRandom::new();
 
-    // 3. Sign
-    let sig = key_pair.sign(&rng, payload)
-        .map_err(|e| WebtokenError::Generic(format!("Signing failed: {:?}", e)))?;
+    let sig = key_pair.sign(&rng, payload).map_err(|e| WebtokenError::Generic(format!(
+        "Signing failed: {:?}", e)))?;
     
     Ok(sig.as_ref().to_vec())
 }
 
 fn decode_maybe_pem(data: &[u8]) -> Result<Vec<u8>, WebtokenError> {
-    // 1. Check for PEM header
+
     if let Ok(s) = std::str::from_utf8(data) {
         let s = s.trim();
         if s.starts_with("-----BEGIN") {
@@ -200,7 +197,7 @@ fn decode_maybe_pem(data: &[u8]) -> Result<Vec<u8>, WebtokenError> {
             });
         }
     }
-    // 2. Assume it is already DER (or raw bytes for HMAC/Ed25519)
+    // Assume it is already DER (or raw bytes for HMAC/Ed25519)
     Ok(data.to_vec())
 }
 
@@ -231,13 +228,11 @@ impl Algorithm {
             Self::Ps384 => sign_rsa(&RSA_PSS_SHA384, &der_bytes, payload),
             Self::Ps512 => sign_rsa(&RSA_PSS_SHA512, &der_bytes, payload),
 
-            // EdDSA (Ed25519 only in aws-lc-rs currently)
+            // EdDSA 
             Self::EdDsa => {
-                 // Try PKCS#8 first
                  if let Ok(key_pair) = Ed25519KeyPair::from_pkcs8(&der_bytes) {
                      return Ok(key_pair.sign(payload).as_ref().to_vec());
                  }
-                 // If that fails, try Seed (Raw 32 bytes)
                  if let Ok(key_pair) = Ed25519KeyPair::from_seed_unchecked(&der_bytes) {
                      return Ok(key_pair.sign(payload).as_ref().to_vec());
                  }

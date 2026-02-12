@@ -3,7 +3,6 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::Value; 
 use num_bigint::BigUint;
 
-// We still import Algorithm for parsing strings, but we don't need EncodingKey/DecodingKey/crypto anymore
 use pyo3::prelude::*;
 use pyo3::create_exception; 
 use pyo3::types::{PyDict, PyList, PyBytes, PyInt};
@@ -359,7 +358,6 @@ pub fn check_rsa_key_length(key: &Bound<'_, PyAny>) -> PyResult<Option<String>> 
 #[pyo3(signature = (key, expected_kty, expected_crv=None))]
 pub fn validate_key_properties(key: &PyJWK, expected_kty: &str, expected_crv: Option<&str>) -> PyResult<()> {
    
-    // 1. Existing KTY/CRV checks
     let kty = key.inner.get("kty").and_then(|v| v.as_str()).unwrap_or("");
     if kty != expected_kty {
         return Err(InvalidKeyError::new_err(format!("Invalid key type: {}. Expected {}.", kty, expected_kty)));
@@ -387,7 +385,6 @@ pub fn validate_key_properties(key: &PyJWK, expected_kty: &str, expected_crv: Op
         }
     }
 
-    // Specific validation for OKP/Ed25519
     if kty == "OKP" && expected_crv == Some("Ed25519") {
         let x_b64 = key.inner.get("x").and_then(|v| v.as_str())
             .ok_or_else(|| InvalidKeyError::new_err("Missing x component"))?;
@@ -558,7 +555,7 @@ impl PyEllipticCurvePrivateNumbers {
 // --- Exposed Functions ---
 
 pub fn from_jwk(jwk: &Bound<'_, PyAny>, algorithm_hint: &str) -> PyResult<PyJWK> {
-    // [FIX] Treat empty string as None
+
     let hint = if algorithm_hint.is_empty() { 
         None 
     } else { 
@@ -630,6 +627,7 @@ pub fn perform_verification_jwk(payload: &[u8], signature: &[u8], jwk: &PyJWK, a
 
 
 pub fn register_jwk_module(py: Python, parent_module: &Bound<'_, PyModule>) -> PyResult<()> {   
+
     parent_module.add("PyJWKSetError", py.get_type::<PyJWKSetError>())?; 
     parent_module.add("PyJWKError", py.get_type::<PyJWKError>())?;  
     parent_module.add_class::<PyJWKSetIterator>()?;

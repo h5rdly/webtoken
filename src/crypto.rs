@@ -7,7 +7,7 @@ use pyo3::types::PyBytes;
 use pyo3::exceptions::PyValueError;
 
 
-use aws_lc_rs::{aead, hkdf, pbkdf2, rand, digest as _digest};
+use aws_lc_rs::{aead, hkdf, pbkdf2, rand, digest as _digest, agreement};
 use aws_lc_rs::rsa::KeySize;
 use aws_lc_rs::encoding::AsDer;
 use aws_lc_rs::signature::{
@@ -23,11 +23,64 @@ use aws_lc_rs::signature::{
 use aws_lc_rs::unstable::signature::{PqdsaKeyPair, ML_DSA_65_SIGNING, ML_DSA_44_SIGNING, ML_DSA_87_SIGNING
 };
 
+use graviola::aead::XChaCha20Poly1305;
+
+
 use num_bigint::{BigInt, BigUint, Sign};
 use num_integer::Integer;
 use num_traits::{One, Zero};
 
 use crate::WebtokenError;
+
+
+const XCHACHA_KEY_LEN: usize = 32;
+const XCHACHA_NONCE_LEN: usize = 24;
+const TAG_LEN: usize = 16;
+
+
+pub fn encrypt_xchacha20(key: &[u8], plaintext: &[u8], aad: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), WebtokenError> {
+    
+    let key_arr: [u8; XCHACHA_KEY_LEN] = key.try_into().map_err(|_| WebtokenError::Custom { 
+            exc: "InvalidKeyError".into(), 
+            msg: format!("XChaCha20 requires a {}-byte key", XCHACHA_KEY_LEN).into() 
+        })?;
+
+    let mut nonce = vec![0u8; XCHACHA_NONCE_LEN];
+    rand::fill(&mut nonce)
+        .map_err(|_| WebtokenError::Generic("RNG failed".into()))?;
+    
+    let nonce_arr: &[u8; XCHACHA_NONCE_LEN] = nonce.as_slice().try_into().unwrap(); // Safe unwrap, we just made it
+
+    let cipher = XChaCha20Poly1305::new(key_arr); 
+    let mut buffer = plaintext.to_vec();
+    let mut tag = [0u8; TAG_LEN];
+    cipher.encrypt(nonce_arr, aad, &mut buffer, &mut tag);
+
+    Ok((buffer, tag.to_vec(), nonce))
+}
+
+
+/// Decrypts data using XChaCha20-Poly1305 (Raw Primitive).
+pub fn decrypt_xchacha20(key: &[u8], ciphertext: &[u8], aad: &[u8], nonce: &[u8], tag: &[u8]) -> Result<Vec<u8>, WebtokenError> {
+    
+    let key_arr: [u8; XCHACHA_KEY_LEN] = key.try_into()
+        .map_err(|_| WebtokenError::Custom { exc: "InvalidKeyError".into(), msg: "Invalid key length".into() })?;
+        
+    let nonce_arr: [u8; XCHACHA_NONCE_LEN] = nonce.try_into()
+        .map_err(|_| WebtokenError::Generic("Invalid nonce length".into()))?;
+
+    let tag_arr: [u8; TAG_LEN] = tag.try_into()
+        .map_err(|_| WebtokenError::Generic("Invalid tag length".into()))?;
+
+    let cipher = XChaCha20Poly1305::new(key_arr);
+
+    let mut buffer = ciphertext.to_vec();
+    cipher.decrypt(&nonce_arr, aad, &mut buffer, &tag_arr).map_err(|_| WebtokenError::Custom { 
+            exc: "InvalidSignatureError".into(), msg: "Decryption failed".into() 
+        })?;
+
+    Ok(buffer)
+}
 
 
 fn gen_witness(n: &BigUint) -> Result<BigUint, WebtokenError> {
@@ -127,6 +180,7 @@ pub fn compute_crt(
     Ok((dp, dq, qi))
 }
 
+
 // Extended Euclidean Algorithm for modular inverse
 fn mod_inverse(a: &BigUint, m: &BigUint) -> Option<BigUint> {
     let a_signed = BigInt::from_biguint(Sign::Plus, a.clone());
@@ -145,6 +199,7 @@ fn mod_inverse(a: &BigUint, m: &BigUint) -> Option<BigUint> {
     }
 }
 
+
 fn extended_gcd(a: &BigInt, b: &BigInt) -> (BigInt, BigInt, BigInt) {
     if b.is_zero() {
         (a.clone(), BigInt::one(), BigInt::zero())
@@ -155,7 +210,6 @@ fn extended_gcd(a: &BigInt, b: &BigInt) -> (BigInt, BigInt, BigInt) {
 }
 
 
-// -- Helpers
 
 // Wrap DER bytes in PEM format
 fn to_pem(tag: &str, data: &[u8]) -> Vec<u8> {
@@ -188,12 +242,6 @@ fn der_encode_len(out: &mut Vec<u8>, len: usize) {
 fn der_encode_int(out: &mut Vec<u8>, bytes: &[u8]) {
     out.push(0x02); // INTEGER tag
     
-    // Minimal encoding: DER requires strict shortest representation.
-    // But for SSH conversion, we trust the input bytes mostly conform to signed big-endian.
-    // SSH mpint already includes the leading zero if MSB is set, which matches DER requirements.
-    // However, SSH might have extra leading zeros which DER forbids.
-    // We'll skip extra leading zeros, but keep one if MSB of next byte is set.
-    
     let mut start = 0;
     while start < bytes.len() - 1 && bytes[start] == 0 && (bytes[start+1] & 0x80) == 0 {
         start += 1;
@@ -217,6 +265,7 @@ fn der_encode_int(out: &mut Vec<u8>, bytes: &[u8]) {
 
 
 fn der_encode_sequence(content: &[u8]) -> Vec<u8> {
+
     let mut out = Vec::new();
     out.push(0x30); // SEQUENCE tag
     let len = content.len();

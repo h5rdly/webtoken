@@ -1,6 +1,9 @@
-use std::str::{from_utf8};
-use std::collections::{HashSet, HashMap};
-use std::sync::{OnceLock, RwLock};
+use std::{
+    str::from_utf8, 
+    time::{SystemTime, UNIX_EPOCH} , 
+    collections::{HashSet, HashMap},
+    sync::{OnceLock, RwLock}
+};
 
 use serde_json::{from_slice, from_str, to_vec, Value, Map, map::Entry};
 use serde::{Serialize, Deserialize};
@@ -11,19 +14,21 @@ use pyo3::prelude::*;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::types::{PyBytes, PyDict, PyModule, PyString};
 use pyo3::{wrap_pyfunction}; 
+
 use pythonize::{depythonize, pythonize};
 
 mod algorithms; 
 mod crypto; 
 mod jwk;
 mod jws;
+mod jwe;
 mod py_utils;
 pub mod pyjwt_jwk_api;
 
 use algorithms::{perform_signature, perform_verification};
 use py_utils::decode_base64_permissive;
-use pyjwt_jwk_api::{PyJWK, PyJWKSet, perform_signature_jwk, perform_verification_jwk, 
-    validate_key_properties, check_rsa_key_length};
+use pyjwt_jwk_api::{
+    PyJWK, PyJWKSet, perform_signature_jwk, perform_verification_jwk, validate_key_properties, check_rsa_key_length};
 
 
 #[macro_export]
@@ -59,7 +64,6 @@ struct PartialHeader {
     alg: String,
 }
 
-// [FIX] Local Error Enum (Replaces jsonwebtoken::errors::Error)
 #[derive(Debug)]
 pub enum WebtokenError {
     Generic(String),
@@ -72,11 +76,12 @@ pub enum WebtokenError {
     InvalidIssuer,
     InvalidAudience,
     InvalidAlgorithm,
+    InvalidToken,
     MissingRequiredClaim(String),
     DecodeError(String),
 }
 
-// [FIX] Local Validation Struct (Replaces jsonwebtoken::Validation)
+
 #[derive(Debug, Clone)]
 pub struct Validation {
     pub leeway: u64,
@@ -93,6 +98,26 @@ impl Default for Validation {
         }
     }
 }
+
+
+#[derive(FromPyObject)]
+pub enum BytesOrString {
+    #[pyo3(transparent)]
+    Str(String),
+    #[pyo3(transparent)]
+    Bytes(Vec<u8>),
+}
+
+
+impl From<BytesOrString> for Vec<u8> {
+    fn from(value: BytesOrString) -> Self {
+        match value {
+            BytesOrString::Str(s) => s.into_bytes(),
+            BytesOrString::Bytes(b) => b,
+        }
+    }
+}
+
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -126,12 +151,13 @@ impl std::fmt::Display for WebtokenError {
             WebtokenError::InvalidIssuer => write!(f, "Invalid issuer"),
             WebtokenError::InvalidAudience => write!(f, "Invalid audience"),
             WebtokenError::InvalidAlgorithm => write!(f, "Algorithm not supported"),
+            WebtokenError::InvalidToken => write!(f, "Invalid token"),
             WebtokenError::MissingRequiredClaim(c) => write!(f, "Missing required claim: {}", c),
         }
     }
 }
 
-// [FIX] Updated From<WebtokenError> mapping
+
 impl From<WebtokenError> for PyErr {
     fn from(err: WebtokenError) -> PyErr {
         match err {
@@ -160,6 +186,7 @@ impl From<WebtokenError> for PyErr {
             WebtokenError::InvalidIssuer => InvalidIssuerError::new_err("Invalid issuer"),
             WebtokenError::InvalidAudience => InvalidAudienceError::new_err("Invalid audience"),
             WebtokenError::InvalidAlgorithm => InvalidAlgorithmError::new_err("Algorithm not supported"),
+            WebtokenError::InvalidToken => InvalidTokenError::new_err("Invalid token"),
             WebtokenError::MissingRequiredClaim(c) => MissingRequiredClaimError::new_err(c),
         }
     }
@@ -375,7 +402,7 @@ fn get_key_bytes(
     check_length: bool
 ) -> PyResult<Vec<u8>> {
 
-    // 1. Handle PyJWK Object
+    // Handle PyJWK Object
     if let Ok(jwk) = key.extract::<PyJWK>() { 
         if let Some(ref jwk_alg) = jwk.algorithm_name {
             if jwk_alg.to_uppercase() != alg_name.to_uppercase() {
@@ -392,12 +419,12 @@ fn get_key_bytes(
         return jwk.to_key_bytes(!is_signing); 
     }
 
-    // 2. Handle 'none' algorithm
+    // Handle 'none' algorithm
     if alg_name.eq_ignore_ascii_case("none") { 
         return Ok(Vec::new()); 
     }
 
-    // 3. Extract Raw Bytes
+    // extract Raw Bytes
     let key_slice = if let Ok(s) = key.cast::<PyString>() {
         s.to_str()?.as_bytes()
     } else if let Ok(b) = key.cast::<PyBytes>() {
@@ -406,7 +433,7 @@ fn get_key_bytes(
         return Err(PyTypeError::new_err("Key must be string or bytes"));
     };
 
-    // 4. Handle PEM/SSH keys
+    // Handle PEM/SSH keys
     if let Ok(s) = from_utf8(key_slice) {
         let s_trim = s.trim();
         if s_trim.starts_with("ssh-") || s_trim.starts_with("ecdsa-") {
@@ -591,20 +618,12 @@ fn prepare_validation(
 }
 
 
-fn validate_claims_content(
-    claims: &Value, 
-    validation: &Validation, 
-    check_exp: bool,
-    check_nbf: bool,
-    check_aud: bool,
-    check_iss: bool,
-    check_sub: bool,
-    strict_aud: bool,
-    expected_aud: &Option<HashSet<String>>,
-    expected_iss: &Option<HashSet<String>>,
-    expected_sub: &Option<String>
+fn validate_claims_content(claims: &Value, validation: &Validation, check_exp: bool, check_nbf: bool,
+    check_aud: bool, check_iss: bool, check_sub: bool, strict_aud: bool, 
+    expected_aud: &Option<HashSet<String>>, expected_iss: &Option<HashSet<String>>, expected_sub: &Option<String>
 ) -> Result<(), WebtokenError> {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as f64;
+    
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as f64;
     
     for (claim, err) in [
         ("exp", WebtokenError::Custom{ exc: "DecodeError".into(), msg: "exp must be a number".into() }),
@@ -727,23 +746,10 @@ fn validate_claims_content(
 }
 
 
-fn decode_impl(
-    token: String,
-    key_bytes: Option<Vec<u8>>,
-    validation: Validation,
-    verify: bool,
-    check_iat: bool,
-    check_exp: bool, 
-    check_nbf: bool, 
-    check_aud: bool, 
-    check_iss: bool, 
-    check_sub: bool,
-    strict_aud: bool,
-    expected_aud: Option<HashSet<String>>,
-    expected_iss: Option<HashSet<String>>,
-    expected_sub: Option<String>,
-    detached_content: Option<&[u8]>,
-    convert_to_json: bool,
+fn decode_impl(token: String, key_bytes: Option<Vec<u8>>, validation: Validation, verify: bool,
+    check_iat: bool, check_exp: bool, check_nbf: bool, check_aud: bool, check_iss: bool, check_sub: bool,
+    strict_aud: bool, expected_aud: Option<HashSet<String>>, expected_iss: Option<HashSet<String>>,
+    expected_sub: Option<String>, detached_content: Option<&[u8]>, convert_to_json: bool,
 ) -> Result<TokenPayload, WebtokenError> {
 
     let parts: Vec<&str> = token.split('.').collect();
@@ -838,7 +844,7 @@ fn decode_impl(
     if check_iat {
             if let Some(val) = claims.get("iat") {
                 if let Some(iat) = get_numeric_date(val) {
-                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as f64;
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as f64;
                     if iat > (now + (validation.leeway as f64)) {
                         return Err(WebtokenError::ImmatureSignature);
                     }
@@ -849,25 +855,10 @@ fn decode_impl(
 } 
    
 
-
-
 fn decode_complete_impl(
-    token: String, 
-    // [CHANGED]
-    key_bytes: Option<Vec<u8>>, 
-    validation: Validation, 
-    verify: bool, 
-    check_iat: bool, 
-    check_exp: bool, 
-    check_nbf: bool, 
-    check_aud: bool, 
-    check_iss: bool, 
-    check_sub: bool,
-    strict_aud: bool,
-    aud: Option<HashSet<String>>, 
-    iss: Option<HashSet<String>>,
-    sub: Option<String>,
-    detached_content: Option<&[u8]>,
+    token: String, key_bytes: Option<Vec<u8>>, validation: Validation, verify: bool, check_iat: bool, 
+    check_exp: bool, check_nbf: bool, check_aud: bool, check_iss: bool, check_sub: bool, strict_aud: bool,
+    aud: Option<HashSet<String>>, iss: Option<HashSet<String>>, sub: Option<String>, detached_content: Option<&[u8]>,
     convert_to_json: bool,
 ) -> Result<CompleteToken, WebtokenError> {
 
@@ -1079,6 +1070,32 @@ fn decode<'py>(
 }
 
 
+#[pyfunction]
+#[pyo3(signature = (payload, key, alg="dir", enc="XC20P"))]
+fn encrypt(payload: BytesOrString, key: &[u8], alg: &str, enc: &str) -> PyResult<String> {
+
+    let payload_bytes: Vec<u8> = payload.into();
+        
+     if alg == "dir" && enc == "XC20P" {
+        return jwe::encode_xc20p(&payload_bytes, key).map_err(PyErr::from);
+    }
+    
+    Err(PyValueError::new_err(format!("Unsupported JWE algorithm/encryption pair: alg='{}' enc='{}'", 
+        alg, enc
+    )))
+}
+
+
+#[pyfunction]
+fn decrypt<'py>(py: Python<'py>, token: &str, key: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+
+    // Direct mode only 
+    let payload = jwe::decode_xc20p(token, key).map_err(PyErr::from)?;
+
+    Ok(PyBytes::new(py, &payload))
+}
+
+
 fn base64url_decode_inner(input: &str) -> Result<Vec<u8>, String> {
     let clean: String = input.chars().filter(|c| !c.is_ascii_whitespace()).collect();
     if let Ok(v) = URL_SAFE_NO_PAD.decode(&clean) { return Ok(v); }
@@ -1117,13 +1134,6 @@ fn unsafe_peek<'py>(py: Python<'py>, token: &str) -> PyResult<Bound<'py, PyAny>>
     Ok(pythonize(py, &claims).unwrap())
 }
 
-#[derive(FromPyObject)]
-pub enum PemInput {
-    #[pyo3(transparent)]
-    Str(String),
-    #[pyo3(transparent)]
-    Bytes(Vec<u8>),
-}
 
 #[pyfunction]
 fn pem_to_jwk(pem: &[u8]) -> PyResult<String> {
@@ -1168,12 +1178,9 @@ fn validate_claims(
 
 
 #[pyfunction]
-fn load_key_from_pem(key_data: PemInput) -> PyResult<PyJWK> {
-    let pem_bytes = match key_data {
-        PemInput::Str(s) => s.into_bytes(),
-        PemInput::Bytes(b) => b,
-    };
-
+fn load_key_from_pem(key_data: BytesOrString) -> PyResult<PyJWK> {
+    let pem_bytes: Vec<u8> = key_data.into();
+      
     let json_str = crate::jwk::pem_to_jwk(&pem_bytes).map_err(|e| PyValueError::new_err(e))?;
     let val: serde_json::Value = from_str(&json_str).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let alg = val.get("alg").and_then(|s| s.as_str()).map(|s| s.to_string());
@@ -1230,6 +1237,9 @@ fn _webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(register_algorithm, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_algorithm, m)?)?;
     m.add_function(wrap_pyfunction!(validate_claims, m)?)?;
+
+    m.add_function(wrap_pyfunction!(encrypt, m)?)?;
+    m.add_function(wrap_pyfunction!(decrypt, m)?)?;
 
     m.add_function(wrap_pyfunction!(load_jwk, m)?)?;
     m.add_function(wrap_pyfunction!(load_jwk_set, m)?)?; 
