@@ -29,15 +29,15 @@ ES512
 Enc: 1.9x | Dec: 1.5x
 ```
 
-See and suggest more benchmarks under [benchmarks](https://github.com/h5rdly/toke/blob/main/benchmarks/).
+More under [benchmarks](https://github.com/h5rdly/toke/blob/main/benchmarks/).
 
 ##  Installation
 
 `pip install webtoken`
 
 - Developed on Linux / Python 3.13
+- Tested on Linux (+ Alpine) / Windows / MacOS / FreeBSD
 - Wheels available for Linux (+ Alpine) / Windows / MacOS 
-- `sdist` for FreeBSD
 
 ##  Usage
 
@@ -57,11 +57,12 @@ print(decoded)
 
 #### Asyncio variants
 
+- The rust based encode/decode release the GIL
+
+- You can send them away on asyncio.to_thread(), or use the provided wrappers
+
 ```python
 import webtoken as wt
-
-# The rust based encode/decode release the GIL
-# You can send them away on asyncio.to_thread(), or use the provided wrappers
 
 payload = {"name": "Bob"}
 token = await wt.encode_async(payload, "secret", algorithm="HS256")
@@ -72,9 +73,9 @@ print(decoded)
 ```
 #### Crypto / base64 complementary utils
 
-Since webtoken already has aws-lc-rs in its standalone module, it exposes several auxiliary utilities.
+- Since webtoken already has aws-lc-rs in its standalone module, it exposes several auxiliary utilities
 
-This, for example, allows running tests, such as the PyJWT ported test suites, without importing cryptography.
+- This, for example, allows running tests, such as the PyJWT ported test suites, without importing cryptography
 
 ```python
 import webtoken as wt
@@ -110,10 +111,10 @@ PyJWT compat -
 - HS512
 - RS256
 - RS384
-- RS512-
+- RS512
 - ES512
 
-Also - 
+As well as - 
 - ES256K
 - ML-DSA-65
 
