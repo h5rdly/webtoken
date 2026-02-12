@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 
 [project.urls]
-Homepage = "https://github.com/h5rdly/webtoken"
+Homepage = "https://github.com/h5rdly/webtoken/wiki"
 
 [tool.maturin]
 features = ["pyo3/extension-module", "pyo3/abi3-py311"]
