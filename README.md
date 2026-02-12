@@ -89,6 +89,8 @@ wt.base64url_decode(b'Ym9i').decode()
 rand_7 = wt.random_bytes(7)       # Get your cryptographically secure random bytes here 
 
 priv, pub = wt.generate_key_pair('rs256')  
+
+verifier, challenge = wt.generate_pkce_pair()
 ```
 
 ##  Compatibility

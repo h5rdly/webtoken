@@ -1,10 +1,11 @@
 use std::num::NonZeroU32;
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
 
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::exceptions::PyValueError;
+
 
 use aws_lc_rs::{aead, hkdf, pbkdf2, rand, digest as _digest};
 use aws_lc_rs::rsa::KeySize;
@@ -383,12 +384,30 @@ fn load_ssh_public_key(py: Python, data: &[u8]) -> PyResult<Py<PyBytes>> {
 }
 
 
-/// Generate cryptographically secure random bytes.
+//  cryptographically secure random bytes.
 #[pyfunction]
 fn random_bytes<'py>(py: Python<'py>, length: usize) -> PyResult<Bound<'py, PyBytes>> {
     let mut out = vec![0u8; length];
     rand::fill(&mut out).map_err(|_| PyValueError::new_err("RNG failed"))?;
     Ok(PyBytes::new(py, &out))
+}
+
+
+#[pyfunction]
+pub fn generate_pkce_pair() -> PyResult<(String, String)> {
+
+    let mut random_bytes = [0u8; 32];
+    rand::fill(&mut random_bytes)
+        .map_err(|_| PyValueError::new_err("Failed to generate secure random bytes"))?;
+
+    // RFC 7636: A random string of 43-128 chars. 32 bytes Base64URL-encoded results in 43 chars.
+    let verifier = URL_SAFE_NO_PAD.encode(random_bytes);
+
+    // Code Challenge - S256 transformation. Challenge = Base64Url(SHA256(ASCII(Verifier)))
+    let hash = _digest::digest(&_digest::SHA256, verifier.as_bytes());
+    let challenge = URL_SAFE_NO_PAD.encode(hash.as_ref());
+
+    Ok((verifier, challenge))
 }
 
 
@@ -582,6 +601,7 @@ pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hkdf_sha256, m)?)?;
     m.add_function(wrap_pyfunction!(pbkdf2_hmac_sha256, m)?)?;
     m.add_function(wrap_pyfunction!(random_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_pkce_pair, m)?)?;
     m.add_function(wrap_pyfunction!(generate_key_pair, m)?)?;
     
     Ok(())

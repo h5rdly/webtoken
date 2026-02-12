@@ -2,6 +2,7 @@ use crate::{WebtokenError};
 use std::str::FromStr;
 
 use base64::{Engine as _, engine::general_purpose::{STANDARD,}};
+use blake2::{Blake2bMac512, digest::{KeyInit, Mac}};
 
 use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::hmac::{self, Key as HmacKey, HMAC_SHA256, HMAC_SHA384, HMAC_SHA512};
@@ -32,6 +33,11 @@ use aws_lc_rs::signature::{
 use aws_lc_rs::unstable::signature::{PqdsaKeyPair, ML_DSA_65, ML_DSA_65_SIGNING};
 
 
+// for PASETO v4 MAC & key derivation
+pub type Blake2bMac256 = blake2::Blake2bMac<blake2::digest::consts::U32>; 
+pub type _Blake2bMac448 = blake2::Blake2bMac<blake2::digest::consts::U56>;  // For internal use
+
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Algorithm {
     Hs256, Hs384, Hs512,
@@ -40,7 +46,9 @@ pub enum Algorithm {
     EdDsa,
     Es256, Es384, 
     Es512, Es256k,
-    MlDsa65,          
+    MlDsa65,      
+    Blake2b512, Blake2b256,
+
 }
  
 
@@ -53,6 +61,8 @@ impl std::fmt::Display for Algorithm {
             Algorithm::Es256 => "ES256", Algorithm::Es384 => "ES384", Algorithm::Es512 => "ES512", Algorithm::Es256k => "ES256K",
             Algorithm::EdDsa => "EdDSA",
             Algorithm::MlDsa65 => "ML-DSA-65",
+            Algorithm::Blake2b512 => "BLAKE2b512",
+            Algorithm::Blake2b256 => "BLAKE2b256",
         };
         write!(f, "{}", s)
     }
@@ -79,6 +89,9 @@ impl FromStr for Algorithm {
             "ES256K" => Ok(Algorithm::Es256k),
             "EdDSA" | "Ed25519" => Ok(Algorithm::EdDsa),
             "ML-DSA-65" => Ok(Algorithm::MlDsa65),
+            "BLAKE2b512" => Ok(Algorithm::Blake2b512),
+            "BLAKE2b256" => Ok(Algorithm::Blake2b256),
+
             _ => Err(WebtokenError::InvalidAlgorithm),
         }
     }
@@ -92,10 +105,37 @@ fn sign_hmac(alg: &'static hmac::Algorithm, key: &[u8], payload: &[u8]) -> Resul
     Ok(tag.as_ref().to_vec())
 }
 
+
 fn verify_hmac(alg: &'static hmac::Algorithm, key: &[u8], payload: &[u8], sig: &[u8]) -> Result<bool, WebtokenError> {
     let key = HmacKey::new(*alg, key);
     Ok(hmac::verify(&key, payload, sig).is_ok())
 }
+
+
+fn sign_blake2<D: Mac + KeyInit>(key: &[u8], payload: &[u8]) -> Result<Vec<u8>, WebtokenError> {
+    let mut mac = <D as KeyInit>::new_from_slice(key)
+        .map_err(|_| WebtokenError::Custom { 
+            exc: "InvalidKeyError".into(), 
+            msg: "Invalid key length for BLAKE2".into() 
+        })?;
+
+    mac.update(payload);
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+
+fn verify_blake2<D: Mac + KeyInit>(key: &[u8], payload: &[u8], sig: &[u8]) -> Result<bool, WebtokenError> {
+    
+    let mut mac = <D as KeyInit>::new_from_slice(key)
+        .map_err(|_| WebtokenError::Custom { 
+            exc: "InvalidKeyError".into(), 
+            msg: "Invalid key length for BLAKE2".into() 
+        })?;
+        
+    mac.update(payload);
+    Ok(mac.verify_slice(sig).is_ok())
+}
+
 
 fn sign_rsa(
     alg: &'static aws_lc_rs::signature::RsaSignatureEncoding, 
@@ -177,6 +217,10 @@ impl Algorithm {
             Self::Hs384 => sign_hmac(&HMAC_SHA384, &der_bytes, payload),
             Self::Hs512 => sign_hmac(&HMAC_SHA512, &der_bytes, payload),
 
+            // BLAKE2
+            Self::Blake2b512 => sign_blake2::<Blake2bMac512>(&der_bytes, payload),
+            Self::Blake2b256 => sign_blake2::<Blake2bMac256>(&der_bytes, payload),
+
             // RSA PKCS#1
             Self::Rs256 => sign_rsa(&RSA_PKCS1_SHA256, &der_bytes, payload),
             Self::Rs384 => sign_rsa(&RSA_PKCS1_SHA384, &der_bytes, payload),
@@ -235,6 +279,10 @@ impl Algorithm {
             Self::Hs256 => verify_hmac(&HMAC_SHA256, &der_bytes, payload, sig_bytes)?,
             Self::Hs384 => verify_hmac(&HMAC_SHA384, &der_bytes, payload, sig_bytes)?,
             Self::Hs512 => verify_hmac(&HMAC_SHA512, &der_bytes, payload, sig_bytes)?,
+
+            // BLAKE2
+            Self::Blake2b512 => verify_blake2::<Blake2bMac512>(&der_bytes, payload, sig_bytes)?,
+            Self::Blake2b256 => verify_blake2::<Blake2bMac256>(&der_bytes, payload, sig_bytes)?,
 
             // RSA PKCS#1
             Self::Rs256 => UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, &der_bytes).verify(payload, sig_bytes).is_ok(),

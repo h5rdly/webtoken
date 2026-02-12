@@ -286,13 +286,14 @@ pub fn get_algorithm(py: Python, name: &str) -> Option<Py<PyAny>> {
 // [FIX] Simple string matching instead of jsonwebtoken Enum
 fn is_hmac(alg: &str) -> bool {
     let s = alg.to_uppercase();
-    matches!(s.as_str(), "HS256" | "HS384" | "HS512")
+    matches!(s.as_str(), "HS256" | "HS384" | "HS512" | "BLAKE2b512" | "BLAKE2b256")
 }
 
 // [FIX] Validate if algorithm is supported locally
 fn is_supported_algorithm(alg: &str) -> bool {
     matches!(alg, 
         "HS256" | "HS384" | "HS512" |
+        "BLAKE2b512" | "BLAKE2b256" |
         "RS256" | "RS384" | "RS512" |
         "PS256" | "PS384" | "PS512" |
         "ES256" | "ES384" | "ES512" | "ES521" | "ES256K" |
@@ -415,7 +416,6 @@ fn get_key_bytes(
         }
     }
     
-    // [FIX] Validated against local string list instead of jsonwebtoken Algorithm enum
     if is_supported_algorithm(alg_name) {
         if is_hmac(alg_name) {
             if bytes_look_like_public_key(key_slice) { 
@@ -427,6 +427,8 @@ fn get_key_bytes(
                     "HS256" => 32,
                     "HS384" => 48,
                     "HS512" => 64,
+                    "BLAKE2b512" => 64,
+                    "BLAKE2b256" => 32,
                     _ => 0,
                 };
                 if key_slice.len() < min_len {

@@ -6,7 +6,6 @@ from collections.abc import Iterable
 ## -- Moudle loading helpers 
 
 def _load_module(module_name: str, path: str):
-    print(f'### Trying to load rust module from {path}')
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec and spec.loader:
         mod = importlib.util.module_from_spec(spec)
