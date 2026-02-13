@@ -141,7 +141,6 @@ def encode(
     check_length: bool = False
 ) -> str:
     
-    print('fpoo')
     if isinstance(payload, dict) and json_encoder is None:
         return  rust_lib.encode(payload, key, algorithm, headers, sort_headers, check_length)
 

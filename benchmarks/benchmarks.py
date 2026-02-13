@@ -1,6 +1,6 @@
 import asyncio, sys, time
 
-sys.path.append(__file__.rsplit("/", 2)[0])
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 import webtoken
 
 import jwt
@@ -79,20 +79,13 @@ def benchmark(iterations=100):
     
     # Standard
     compare_algo("HS256", is_symmetric=True)
-    compare_algo("RS256")
-    compare_algo("ES256")
-    compare_algo("EdDSA") # PyJWT supports this if cryptography >= 2.6
-    
-    # Heavy
-    compare_algo("ES512") # NIST P-521
-    
-    # Toke Exclusives
-    compare_algo("ES256K") # secp256k1
-    compare_algo("ML-DSA-65") # Post-Quantum
+    for algo in "RS256", "ES256", "EdDSA", "ES512", "ES256K", "ML-DSA-65":
+        compare_algo(algo)
 
 
 if __name__ == "__main__":
 
+    
     benchmarks = (benchmark,
         )
 
