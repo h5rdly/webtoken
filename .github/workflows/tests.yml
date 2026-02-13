@@ -73,7 +73,7 @@ jobs:
         uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
-          prepare: pkg install -y rust python313 py313-pip git
+          prepare: pkg install -y rust python312 py312-pip git
           run: |
             python3 -m venv venv
             . venv/bin/activate
