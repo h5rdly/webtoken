@@ -10,7 +10,7 @@ The `.so` size on linux is ~3.5Mb, no external dependencies.
 
 ##  Speed
 
-[Simple benchmark](https://github.com/h5rdly/toke/blob/main/benchmarks/benchmarks.py)
+[Simple benchmark](https://github.com/h5rdly/toke/blob/main/benchmarks/benchmarks.py) comparison to PyJWT
 
 ```
 HS256
