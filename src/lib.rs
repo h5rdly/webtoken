@@ -72,23 +72,6 @@ struct PartialHeader {
     alg: String,
 }
 
-#[derive(Debug)]
-pub enum WebtokenError {
-    Generic(String),
-    Custom { exc: String, msg: String },
-    
-    // Standard JWT Errors
-    InvalidSignature,
-    ExpiredSignature,
-    ImmatureSignature,
-    InvalidIssuer,
-    InvalidAudience,
-    InvalidAlgorithm,
-    InvalidToken(String),
-    MissingRequiredClaim(String),
-    DecodeError(String),
-}
-
 
 #[derive(FromPyObject)]
 pub enum BytesOrString {
@@ -109,20 +92,48 @@ impl From<BytesOrString> for Vec<u8> {
 }
 
 
+#[derive(Debug)]
+pub enum WebtokenError {
+    Generic(String),
+    
+    InvalidSignature,
+    ExpiredSignature,
+    ImmatureSignature,
+    InvalidIssuer(String),
+    InvalidAudience(String),
+    InvalidAlgorithm(String), 
+    InvalidToken(String),
+    MissingRequiredClaim(String),
+    DecodeError(String),
+    InvalidKey(String),
+    InvalidSubject(String),
+    InvalidJTI(String),
+    InvalidIssuedAt(String),
+    UnsupportedAlgorithm(String),
+    UnsupportedEncryption(String),
+}
+
+
 impl std::fmt::Display for WebtokenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WebtokenError::Generic(s) => write!(f, "{}", s),
-            WebtokenError::Custom { exc, msg } => write!(f, "{}: {}", exc, msg),
-            WebtokenError::DecodeError(msg) => write!(f, "DecodeError: {msg}"),
+
             WebtokenError::InvalidSignature => write!(f, "Signature verification failed"),
             WebtokenError::ExpiredSignature => write!(f, "Signature has expired"),
             WebtokenError::ImmatureSignature => write!(f, "The token is not yet valid"),
-            WebtokenError::InvalidIssuer => write!(f, "Invalid issuer"),
-            WebtokenError::InvalidAudience => write!(f, "Invalid audience"),
-            WebtokenError::InvalidAlgorithm => write!(f, "Algorithm not supported"),
+            WebtokenError::InvalidIssuer(msg) => write!(f, "InvalidIssuer: {msg}"),
+            WebtokenError::InvalidAudience(msg) => write!(f, "InvalidAudience: {msg}"),
+            WebtokenError::InvalidAlgorithm(msg) => write!(f, "Algorithm not supported: {msg}"),
             WebtokenError::InvalidToken(msg) => write!(f, "InvalidTokenError: {msg}"),
-            WebtokenError::MissingRequiredClaim(c) => write!(f, "Missing required claim: {}", c),
+            WebtokenError::MissingRequiredClaim(c) => write!(f, "Missing required claim: {c}"),
+            WebtokenError::DecodeError(msg) => write!(f, "DecodeError: {msg}"),
+            WebtokenError::InvalidKey(msg) => write!(f, "InvalidKeyError: {msg}"),
+            WebtokenError::InvalidSubject(msg) => write!(f, "InvalidSubjectError: {msg}"),
+            WebtokenError::InvalidJTI(msg) => write!(f, "InvalidJTIError: {msg}"),
+            WebtokenError::InvalidIssuedAt(msg) => write!(f, "InvalidIssuedAtError: {msg}"),
+            WebtokenError::UnsupportedAlgorithm(msg) => write!(f, "UnsupportedAlgorithmError: {msg}"),
+            WebtokenError::UnsupportedEncryption(msg) => write!(f, "UnsupportedEncryptionError: {msg}"),
         }
     }
 }
@@ -132,33 +143,22 @@ impl From<WebtokenError> for PyErr {
     fn from(err: WebtokenError) -> PyErr {
         match err {
             WebtokenError::Generic(s) => PyValueError::new_err(s),
-            WebtokenError::Custom { exc, msg } => {
-                match exc.as_str() {
-                    "InvalidAudienceError" => InvalidAudienceError::new_err(msg),
-                    "MissingRequiredClaimError" => MissingRequiredClaimError::new_err(msg),
-                    "InvalidIssuerError" => InvalidIssuerError::new_err(msg),
-                    "InvalidSignatureError" => InvalidSignatureError::new_err(msg),
-                    "DecodeError" => DecodeError::new_err(msg),
-                    "InvalidSubjectError" => InvalidSubjectError::new_err(msg),
-                    "InvalidIssuedAtError" => InvalidIssuedAtError::new_err(msg),
-                    "InvalidJTIError" => InvalidJTIError::new_err(msg),
-                    "ExpiredSignatureError" => ExpiredSignatureError::new_err(msg),
-                    "ImmatureSignatureError" => ImmatureSignatureError::new_err(msg),
-                    "InvalidKeyError" => InvalidKeyError::new_err(msg),
-                    "InvalidTokenError" => InvalidTokenError::new_err(msg),
-                    "InvalidAlgorithmError" => InvalidAlgorithmError::new_err(msg),
-                    _ => PyJWTError::new_err(msg),
-                }
-            },
-            WebtokenError::DecodeError(msg) => DecodeError::new_err(msg),
+            
             WebtokenError::InvalidSignature => InvalidSignatureError::new_err("Signature verification failed"),
             WebtokenError::ExpiredSignature => ExpiredSignatureError::new_err("Signature has expired"),
             WebtokenError::ImmatureSignature => ImmatureSignatureError::new_err("The token is not yet valid (iat/nbf)"),
-            WebtokenError::InvalidIssuer => InvalidIssuerError::new_err("Invalid issuer"),
-            WebtokenError::InvalidAudience => InvalidAudienceError::new_err("Invalid audience"),
-            WebtokenError::InvalidAlgorithm => InvalidAlgorithmError::new_err("Algorithm not supported"),
+            WebtokenError::InvalidIssuer(msg) => InvalidIssuerError::new_err(msg),
+            WebtokenError::InvalidAudience(msg) => InvalidAudienceError::new_err(msg),
+            WebtokenError::InvalidAlgorithm(msg) => InvalidAlgorithmError::new_err(msg),
             WebtokenError::InvalidToken(msg) => InvalidTokenError::new_err(msg),
             WebtokenError::MissingRequiredClaim(c) => MissingRequiredClaimError::new_err(c),
+            WebtokenError::DecodeError(msg) => DecodeError::new_err(msg), 
+            WebtokenError::InvalidKey(msg) => InvalidKeyError::new_err(msg),
+            WebtokenError::InvalidSubject(msg) => InvalidSubjectError::new_err(msg),
+            WebtokenError::InvalidJTI(msg) => InvalidJTIError::new_err(msg),
+            WebtokenError::InvalidIssuedAt(msg) => InvalidIssuedAtError::new_err(msg),
+            WebtokenError::UnsupportedAlgorithm(msg) => InvalidAlgorithmError::new_err(msg),
+            WebtokenError::UnsupportedEncryption(msg) => PyValueError::new_err(msg),
         }
     }
 }
@@ -853,35 +853,50 @@ fn load_key_from_pem(key_data: BytesOrString) -> PyResult<PyJWK> {
 
 
 #[pyfunction]
-#[pyo3(signature = (key, payload, purpose="local", footer=None, implicit_assertion=None))]
+#[pyo3(signature = (key, payload, purpose="local", footer=None, implicit_assertion=None, nonce=None))]
 fn paseto_encode(
     key: BytesOrString, 
     payload: &Bound<'_, PyAny>,
     purpose: &str,
     footer: Option<&[u8]>,
-    implicit_assertion: Option<&[u8]>
+    implicit_assertion: Option<&[u8]>,
+    nonce: Option<&[u8]>
 ) -> PyResult<String> {
-    // 1. Process Key
     let key_bytes: Vec<u8> = key.into();
-
-    // 2. Serialize Payload (Python Object -> Rust Serde Value -> JSON Bytes)
     let data: Value = depythonize(payload).map_err(|e| PyValueError::new_err(format!("Serialization failed: {}", e)))?;
     let payload_bytes = to_vec(&data).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // 3. Dispatch based on purpose
     match purpose {
         "local" => {
-            crate::paseto::encrypt_v4_local(&payload_bytes, &key_bytes, footer, implicit_assertion)
-                .map_err(PyErr::from)
+            let key_arr: [u8; 32] = key_bytes.try_into().map_err(|_| PyValueError::new_err("Local key must be 32 bytes"))?;
+            
+            // [FIX] Explicitly map errors to PyValueError here
+            let token_bytes = crate::crypto::paseto_v4_encrypt(
+                &key_arr, 
+                &payload_bytes, 
+                footer.unwrap_or(&[]), 
+                implicit_assertion.unwrap_or(&[]),
+                nonce
+            ).map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            let body = URL_SAFE_NO_PAD.encode(&token_bytes);
+            
+            if let Some(f) = footer {
+                let footer_b64 = URL_SAFE_NO_PAD.encode(f);
+                Ok(format!("v4.local.{}.{}", body, footer_b64))
+            } else {
+                Ok(format!("v4.local.{}", body))
+            }
         },
         "public" => {
+            // [FIX] Explicitly map errors to PyValueError here
             crate::paseto::sign_v4_public(&payload_bytes, &key_bytes, footer, implicit_assertion)
-                .map_err(PyErr::from)
+                .map_err(|e| PyValueError::new_err(format!("{}", e)))
         },
         _ => Err(PyValueError::new_err("Purpose must be 'local' or 'public'"))
     }
 }
-
 
 #[pyfunction]
 #[pyo3(signature = (key, token, purpose="local", implicit_assertion=None))]
@@ -892,27 +907,25 @@ fn paseto_decode<'py>(
     purpose: &str,
     implicit_assertion: Option<&[u8]>
 ) -> PyResult<Bound<'py, PyAny>> {
-    // 1. Process Key
     let key_bytes: Vec<u8> = key.into();
 
-    // 2. Decode & Verify
     let (payload_bytes, _footer) = match purpose {
         "local" => {
+             // [FIX] Explicitly map errors to PyValueError here
              crate::paseto::decrypt_v4_local(token, &key_bytes, implicit_assertion)
-                .map_err(PyErr::from)?
+                .map_err(|e| PyValueError::new_err(format!("{}", e)))?
         },
         "public" => {
+             // [FIX] Explicitly map errors to PyValueError here
              crate::paseto::verify_v4_public(token, &key_bytes, implicit_assertion)
-                .map_err(PyErr::from)?
+                .map_err(|e| PyValueError::new_err(format!("{}", e)))?
         },
         _ => return Err(PyValueError::new_err("Purpose must be 'local' or 'public'"))
     };
 
-    // 3. Deserialize Payload (JSON Bytes -> Rust Serde Value -> Python Object)
     let val: Value = from_slice(&payload_bytes).map_err(|e| PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
     let py_obj = pythonize(py, &val).map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // pythonize returns Bound<'py, PyAny>, so just return it directly
     Ok(py_obj)
 }
 

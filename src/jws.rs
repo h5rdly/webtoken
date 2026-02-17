@@ -46,18 +46,18 @@ pub fn verify_bytes(token: &str, key: &[u8], alg_name: &str) -> Result<(Value, V
     let signing_input = format!("{}.{}", header_b64, payload_b64);
     
     let sig_bytes = decode_base64_permissive(signature_b64.as_bytes())
-        .map_err(|_| WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid crypto padding".into() })?;
+        .map_err(|_| WebtokenError::DecodeError("Invalid crypto padding".into()))?;
 
     crypto::verify(alg_name, key, signing_input.as_bytes(), &sig_bytes)?;
 
     let header_bytes = decode_base64_permissive(header_b64.as_bytes())
-        .map_err(|_| WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid header padding".into() })?;
+        .map_err(|_| WebtokenError::DecodeError("Invalid header padding".into()))?;
     
     let header: Value = serde_json::from_slice(&header_bytes)
-        .map_err(|e| WebtokenError::Custom { exc: "DecodeError".into(), msg: format!("Invalid header string: {}", e) })?;
+        .map_err(|e| WebtokenError::DecodeError("Invalid header string".into()))?;
     
     let payload_bytes = decode_base64_permissive(payload_b64.as_bytes())
-        .map_err(|_| WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid payload padding".into() })?;
+        .map_err(|_| WebtokenError::DecodeError("Invalid payload padding".into()))?;
     
     Ok((header, payload_bytes))
 }

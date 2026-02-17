@@ -277,7 +277,7 @@ pub fn rsa_encrypt_oaep(pub_key_pem: &[u8], plaintext: &[u8], alg: &str) -> Resu
         "RSA-OAEP"|"RSA-OAEP-256" => &OAEP_SHA256_MGF1SHA256,
         "RSA-OAEP-384" => &OAEP_SHA384_MGF1SHA384,
         "RSA-OAEP-512" => &OAEP_SHA512_MGF1SHA512,
-        _ => return Err(WebtokenError::Custom { exc: "InvalidAlgorithm".into(), msg: "Unsupported RSA-OAEP alg".into() }),
+        _ => return Err(WebtokenError::InvalidAlgorithm("Unsupported RSA-OAEP alg".into()))
     };
 
     let key = PublicEncryptingKey::from_der(&der).map_err(|_| WebtokenError::InvalidToken("Invalid RSA Public Key".into()))?;
@@ -298,7 +298,7 @@ pub fn rsa_decrypt_oaep(priv_key_pem: &[u8], ciphertext: &[u8], alg: &str) -> Re
         "RSA-OAEP"|"RSA-OAEP-256" => &OAEP_SHA256_MGF1SHA256,
         "RSA-OAEP-384" => &OAEP_SHA384_MGF1SHA384,
         "RSA-OAEP-512" => &OAEP_SHA512_MGF1SHA512,
-        _ => return Err(WebtokenError::Custom { exc: "InvalidAlgorithm".into(), msg: "Unsupported RSA-OAEP alg".into() }),
+        _ => return Err(WebtokenError::InvalidAlgorithm("Unsupported RSA-OAEP alg".into())),
     };
 
     let key = PrivateDecryptingKey::from_pkcs8(&der)
@@ -437,25 +437,41 @@ pub fn hmac_sign(key: &[u8], data: &[u8], alg: &str) -> Result<Vec<u8>, Webtoken
     }
 }
 
-// --- AES-GCM (Content Encryption) ---
 
-pub fn aes_gcm_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8], aad: &[u8]) -> Result<(Vec<u8>, Vec<u8>), WebtokenError> {
+pub fn aes_gcm_encrypt(
+    key: &[u8], 
+    nonce_opt: Option<&[u8]>, // Changed from &[u8] to Option<&[u8]>
+    plaintext: &[u8], 
+    aad: &[u8]
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), WebtokenError> {
     let algorithm = match key.len() {
         16 => &AES_128_GCM,
         32 => &AES_256_GCM,
         _ => return Err(WebtokenError::InvalidToken("AES-GCM Key must be 16 or 32 bytes".into())),
     };
 
-    let unbound_key = UnboundKey::new(algorithm, key).map_err(|_| WebtokenError::InvalidToken("Invalid AES-GCM Key".into()))?;
+    let unbound_key = UnboundKey::new(algorithm, key)
+        .map_err(|_| WebtokenError::InvalidToken("Invalid AES-GCM Key".into()))?;
     let sealing_key = LessSafeKey::new(unbound_key);
-    let nonce_obj = Nonce::try_assume_unique_for_key(nonce).map_err(|_| WebtokenError::InvalidToken("Invalid Nonce (must be 12 bytes)".into()))?;
+    
+    // Use provided nonce or generate random
+    let nonce_vec = if let Some(n) = nonce_opt {
+        if n.len() != 12 { return Err(WebtokenError::InvalidToken("AES-GCM Nonce must be 12 bytes".into())); }
+        n.to_vec()
+    } else {
+        get_random_bytes(12)?
+    };
+
+    let nonce_obj = Nonce::try_assume_unique_for_key(&nonce_vec)
+        .map_err(|_| WebtokenError::InvalidToken("Invalid Nonce".into()))?;
     
     let mut in_out = plaintext.to_vec();
     let tag = sealing_key.seal_in_place_separate_tag(nonce_obj, Aad::from(aad), &mut in_out)
         .map_err(|_| WebtokenError::Generic("AES-GCM Encrypt Failed".into()))?;
         
-    Ok((in_out, tag.as_ref().to_vec()))
+    Ok((in_out, tag.as_ref().to_vec(), nonce_vec))
 }
+
 
 pub fn aes_gcm_decrypt(key: &[u8], nonce: &[u8], ciphertext: &[u8], tag: &[u8], aad: &[u8]) -> Result<Vec<u8>, WebtokenError> {
     let algorithm = match key.len() {
@@ -489,16 +505,30 @@ pub fn encrypt_xchacha20_detached(key: &[u8; 32], nonce: &[u8; 24], plaintext: &
     Ok((buffer, tag.to_vec()))
 }
 
-pub fn encrypt_xchacha20(key: &[u8], plaintext: &[u8], aad: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), WebtokenError> {
-    let key_arr: [u8; XCHACHA_KEY_LEN] = key.try_into().map_err(|_| WebtokenError::Custom { 
-        exc: "InvalidKeyError".into(), msg: format!("XChaCha20 requires a {}-byte key", XCHACHA_KEY_LEN).into() 
-    })?;
-    let mut nonce = vec![0u8; XCHACHA_NONCE_LEN];
-    aws_lc_rs::rand::fill(&mut nonce).map_err(|_| WebtokenError::Generic("RNG failed".into()))?;
-    let nonce_arr: [u8; 24] = nonce.clone().try_into().unwrap();
+
+pub fn encrypt_xchacha20(
+    key: &[u8], 
+    plaintext: &[u8], 
+    aad: &[u8],
+    nonce_opt: Option<&[u8]> // New argument
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), WebtokenError> {
+    let key_arr: [u8; XCHACHA_KEY_LEN] = key.try_into().map_err(|_|
+        WebtokenError::InvalidKey(format!("XChaCha20 requires a {XCHACHA_KEY_LEN}-byte key"))
+    )?;
+
+    // Use provided nonce or generate random
+    let nonce_vec = if let Some(n) = nonce_opt {
+        if n.len() != XCHACHA_NONCE_LEN { return Err(WebtokenError::InvalidToken("XChaCha20 Nonce must be 24 bytes".into())); }
+        n.to_vec()
+    } else {
+        get_random_bytes(XCHACHA_NONCE_LEN)?
+    };
+    
+    let nonce_arr: [u8; 24] = nonce_vec.clone().try_into().unwrap();
     let (ciphertext, tag) = encrypt_xchacha20_detached(&key_arr, &nonce_arr, plaintext, aad)?;
-    Ok((ciphertext, tag, nonce))
+    Ok((ciphertext, tag, nonce_vec))
 }
+
 
 pub fn decrypt_xchacha20_detached(key: &[u8; 32], nonce: &[u8; 24], ciphertext: &[u8], tag: &[u8; 16], aad: &[u8]
 ) -> Result<Vec<u8>, WebtokenError> {
@@ -511,7 +541,7 @@ pub fn decrypt_xchacha20_detached(key: &[u8; 32], nonce: &[u8; 24], ciphertext: 
 }
 
 pub fn decrypt_xchacha20(key: &[u8], ciphertext: &[u8], aad: &[u8], nonce: &[u8], tag: &[u8]) -> Result<Vec<u8>, WebtokenError> {
-    let key_arr: [u8; XCHACHA_KEY_LEN] = key.try_into().map_err(|_| WebtokenError::Custom { exc: "InvalidKeyError".into(), msg: "Invalid key".into() })?;
+    let key_arr: [u8; XCHACHA_KEY_LEN] = key.try_into().map_err(|_| WebtokenError::InvalidKey("Invalid key".into()))?;
     let nonce_arr: [u8; XCHACHA_NONCE_LEN] = nonce.try_into().map_err(|_| WebtokenError::Generic("Invalid nonce".into()))?;
     let tag_arr: [u8; TAG_LEN] = tag.try_into().map_err(|_| WebtokenError::Generic("Invalid tag".into()))?;
     decrypt_xchacha20_detached(&key_arr, &nonce_arr, ciphertext, &tag_arr, aad)
@@ -539,7 +569,7 @@ pub fn x25519_public_from_private(private_key_bytes: &[u8]) -> Result<Vec<u8>, W
 }
 
 pub fn ed25519_public_from_seed(seed: &[u8]) -> Result<Vec<u8>, WebtokenError> {
-    let pair = Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| WebtokenError::Custom { exc: "InvalidKeyError".into(), msg: "Invalid Ed25519 seed".into() })?;
+    let pair = Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| WebtokenError::InvalidKey("Invalid Ed25519 seed".into()))?;
     Ok(pair.public_key().as_ref().to_vec())
 }
 
@@ -625,7 +655,7 @@ pub fn sign(alg: &str, key_data: &[u8], message: &[u8]) -> Result<Vec<u8>, Webto
                     let wrapped = wrap_pkcs1_as_pkcs8(&der);
                     RsaKeyPair::from_pkcs8(&wrapped)
                 })
-                .map_err(|_| WebtokenError::Custom { exc: "InvalidKeyError".into(), msg: "Invalid RSA key".into() })?;
+                .map_err(|_| WebtokenError::InvalidKey("Invalid RSA key".into()))?;
             
             let mut sig = vec![0u8; kp.public_modulus_len()];
             kp.sign($algo, &SystemRandom::new(), message, &mut sig).map_err(|_| WebtokenError::Generic("RSA sign failed".into()))?;
@@ -636,7 +666,7 @@ pub fn sign(alg: &str, key_data: &[u8], message: &[u8]) -> Result<Vec<u8>, Webto
     // [AWS-LC-RS] Helper for EC signing
     macro_rules! sign_aws_ec {
         ($algo:expr) => {{
-            let kp = EcdsaKeyPair::from_pkcs8($algo, &der).map_err(|_| WebtokenError::Custom { exc: "InvalidKeyError".into(), msg: "Invalid EC key".into() })?;
+            let kp = EcdsaKeyPair::from_pkcs8($algo, &der).map_err(|_| WebtokenError::InvalidKey("Invalid EC key".into()))?;
             Ok(kp.sign(&SystemRandom::new(), message).map_err(|_| WebtokenError::Generic("EC sign failed".into()))?.as_ref().to_vec())
         }}
     }
@@ -664,13 +694,13 @@ pub fn sign(alg: &str, key_data: &[u8], message: &[u8]) -> Result<Vec<u8>, Webto
         // [AWS-LC-RS] EdDSA
         "EdDSA"|"Ed25519" => {
             let kp = if der.len() == 32 {
-                Ed25519KeyPair::from_seed_unchecked(&der).map_err(|_| WebtokenError::Custom { exc: "InvalidKeyError".into(), msg: "Invalid Ed25519 seed".into() })?
+                Ed25519KeyPair::from_seed_unchecked(&der).map_err(|_| WebtokenError::InvalidKey("Invalid Ed25519 seed".into()))?
             } else {
-                Ed25519KeyPair::from_pkcs8(&der).map_err(|_| WebtokenError::Custom { exc: "InvalidKeyError".into(), msg: "Invalid Ed25519 PKCS8".into() })?
+                Ed25519KeyPair::from_pkcs8(&der).map_err(|_| WebtokenError::InvalidKey("Invalid Ed25519 PKCS8".into()))?
             };
             Ok(kp.sign(message).as_ref().to_vec())
         },
-        _ => Err(WebtokenError::Custom { exc: "InvalidAlgorithmError".into(), msg: "Algorithm not supported".into() }),
+        _ => Err(WebtokenError::InvalidAlgorithm("Algorithm not supported".into())),
     }
 }
 
@@ -703,7 +733,7 @@ pub fn verify(alg: &str, key_data: &[u8], message: &[u8], signature: &[u8]) -> R
             }
         },
 
-        _ => Err(WebtokenError::Custom { exc: "InvalidAlgorithmError".into(), msg: "Algorithm not supported".into() }),
+        _ => Err(WebtokenError::InvalidAlgorithm("Algorithm not supported".into())),
     }
 }
 
@@ -721,9 +751,25 @@ fn pae(pieces: &[&[u8]]) -> Vec<u8> {
     out
 }
 
+
 pub fn paseto_v4_encrypt(
-    key: &[u8; 32], nonce: &[u8; 32], payload: &[u8], footer: &[u8], implicit: &[u8]
+    key: &[u8; 32], 
+    payload: &[u8], 
+    footer: &[u8], 
+    implicit: &[u8],
+    nonce_opt: Option<&[u8]> // New argument
 ) -> Result<Vec<u8>, WebtokenError> {
+    
+    // 1. Generate or use provided nonce (32 bytes for PASETO v4)
+    let nonce_vec = if let Some(n) = nonce_opt {
+        if n.len() != 32 { return Err(WebtokenError::InvalidToken("PASETO v4 Nonce must be 32 bytes".into())); }
+        n.to_vec()
+    } else {
+        get_random_bytes(32)?
+    };
+    let nonce: &[u8; 32] = nonce_vec.as_slice().try_into().unwrap();
+
+    // ... [Rest of logic remains identical] ...
     let mut kdf_enc = Blake2bVar::new(56).map_err(|_| WebtokenError::Generic("KDF".into()))?;
     Update::update(&mut kdf_enc, key);
     Update::update(&mut kdf_enc, b"paseto-encryption-key");
@@ -909,7 +955,9 @@ pub fn generate_key_pair(algorithm: &str, key_size: Option<usize>) -> PyResult<(
 #[pyfunction] pub fn generate_pkce_pair() -> PyResult<(String, String)> { let mut rand_bytes = [0u8; 32]; aws_lc_rs::rand::fill(&mut rand_bytes).map_err(|_| PyValueError::new_err("RNG failed"))?; let verifier = URL_SAFE_NO_PAD.encode(rand_bytes); let hash = Sha256::hash(verifier.as_bytes()); let challenge = URL_SAFE_NO_PAD.encode(hash.as_ref()); Ok((verifier, challenge)) }
 #[pyfunction] #[pyo3(signature = (password, salt, iterations, length=32))] fn pbkdf2_hmac_sha256<'py>(py: Python<'py>, password: &[u8], salt: &[u8], iterations: u32, length: usize) -> PyResult<Bound<'py, PyBytes>> { let mut out = vec![0u8; length]; pbkdf2_manual_sha256(password, salt, iterations, &mut out); Ok(PyBytes::new(py, &out)) }
 #[pyfunction] #[pyo3(signature = (secret, salt, info, length=32))] fn hkdf_sha256_py<'py>(py: Python<'py>, secret: &[u8], salt: &[u8], info: &[u8], length: usize) -> PyResult<Bound<'py, PyBytes>> { let out = hkdf_sha256(secret, salt, info, length); Ok(PyBytes::new(py, &out)) }
-#[pyfunction] #[pyo3(signature = (key, plaintext, aad=None))] fn encrypt_aes_256_gcm<'py>(py: Python<'py>, key: &[u8], plaintext: &[u8], aad: Option<&[u8]>) -> PyResult<Bound<'py, PyBytes>> { if key.len() != 32 { return Err(PyValueError::new_err("AES-256-GCM key must be 32 bytes")); } let (buffer, tag) = aes_gcm_encrypt(key, &get_random_bytes(12).unwrap(), plaintext, aad.unwrap_or(&[])).map_err(|e| PyValueError::new_err(format!("{:?}", e)))?; let mut out_buffer = Vec::with_capacity(12 + buffer.len() + 16); out_buffer.extend_from_slice(&[0u8; 12]); out_buffer.append(&mut buffer.clone()); out_buffer.extend_from_slice(&tag); Ok(PyBytes::new(py, &out_buffer)) }
+
+#[pyfunction] #[pyo3(signature = (key, plaintext, aad=None))] fn encrypt_aes_256_gcm<'py>(py: Python<'py>, key: &[u8], plaintext: &[u8], aad: Option<&[u8]>) -> PyResult<Bound<'py, PyBytes>> { if key.len() != 32 { return Err(PyValueError::new_err("AES-256-GCM key must be 32 bytes")); } let (buffer, tag, nonce) = aes_gcm_encrypt(key, None, plaintext, aad.unwrap_or(&[])).map_err(|e| PyValueError::new_err(format!("{:?}", e)))?; let mut out_buffer = Vec::with_capacity(nonce.len() + buffer.len() + tag.len()); out_buffer.extend_from_slice(&nonce); out_buffer.extend_from_slice(&buffer); out_buffer.extend_from_slice(&tag); Ok(PyBytes::new(py, &out_buffer)) }
+
 #[pyfunction] #[pyo3(signature = (key, ciphertext, aad=None))] fn decrypt_aes_256_gcm<'py>(py: Python<'py>, key: &[u8], ciphertext: &[u8], aad: Option<&[u8]>) -> PyResult<Bound<'py, PyBytes>> { if key.len() != 32 { return Err(PyValueError::new_err("AES-256-GCM key must be 32 bytes")); } if ciphertext.len() < 28 { return Err(PyValueError::new_err("Ciphertext too short")); } let (nonce, rest) = ciphertext.split_at(12); let (encrypted_data, tag) = rest.split_at(rest.len() - 16); let plaintext = aes_gcm_decrypt(key, nonce, encrypted_data, tag, aad.unwrap_or(&[])).map_err(|_| PyValueError::new_err("Decryption failed"))?; Ok(PyBytes::new(py, &plaintext)) }
 #[pyfunction] pub fn ed25519_public_from_seed_py(seed: &[u8]) -> PyResult<Vec<u8>> { ed25519_public_from_seed(seed).map_err(PyErr::from) }
 #[pyfunction] pub fn x25519_public_from_private_py(private_key: &[u8]) -> PyResult<Vec<u8>> { x25519_public_from_private(private_key).map_err(PyErr::from) }

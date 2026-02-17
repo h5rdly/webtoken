@@ -22,14 +22,11 @@ pub fn encrypt_v4_local(payload: &[u8], key: &[u8], footer: Option<&[u8]>, impli
     let footer_bytes = footer.unwrap_or(b"");
     let assertion = implicit_assertion.unwrap_or(b"");
 
-    // 1. Generate Nonce
-    let nonce_vec = crypto::get_random_bytes(32)?;
-    let nonce: [u8; 32] = nonce_vec.try_into().unwrap();
 
-    // 2. Perform PASETO v4 Encryption (Delegate to crypto)
-    let body = crypto::paseto_v4_encrypt(&key_arr, &nonce, payload, footer_bytes, assertion)?;
+    // Perform PASETO v4 Encryption (Delegate to crypto)
+    let body = crypto::paseto_v4_encrypt(&key_arr, payload, footer_bytes, assertion, None)?;
 
-    // 3. Format: v4.local.base64(body).base64(footer)
+    // Format: v4.local.base64(body).base64(footer)
     let mut token = String::from("v4.local.");
     token.push_str(&URL_SAFE_NO_PAD.encode(&body));
     

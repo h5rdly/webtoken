@@ -46,7 +46,7 @@ impl FromStr for Algorithm {
             "ES256K" => Ok(Algorithm::Es256k),
             "EdDSA" | "Ed25519" => Ok(Algorithm::EdDsa),
             "BLAKE2b512" => Ok(Algorithm::Blake2b512),
-            _ => Err(WebtokenError::InvalidAlgorithm),
+            _ => Err(WebtokenError::InvalidAlgorithm("Invalid algorithm".into())),
         }
     }
 }

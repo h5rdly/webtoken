@@ -80,9 +80,9 @@ fn manage_cek_encrypt(alg: &str, enc: &str, key: &[u8], headers: &mut Value) -> 
             // Since `crypto.rs` currently only has `pbkdf2_manual_sha256` which is private/manual,
             // we will need to add a proper `pbkdf2_derive` to `crypto.rs` to support this fully.
             // I will return an error here until crypto.rs is updated for PBKDF2 public access.
-             Err(WebtokenError::Custom { exc: "UnsupportedAlgorithm".into(), msg: format!("PBES2 not fully linked: {}", alg).into() })
+             Err(WebtokenError::UnsupportedAlgorithm(format!("PBES2 not fully linked: {}", alg).into()))
         },
-        _ => Err(WebtokenError::Custom { exc: "UnsupportedAlgorithm".into(), msg: format!("Unknown alg: {}", alg).into() })
+        _ => Err(WebtokenError::UnsupportedAlgorithm(format!("Unknown alg: {}", alg).into()))
     }
 }
 
@@ -119,7 +119,7 @@ fn manage_cek_decrypt(alg: &str, enc: &str, key: &[u8], encrypted_key: &[u8], he
                 crypto::aes_key_unwrap(&kek, encrypted_key)
             }
         },
-        _ => Err(WebtokenError::Custom { exc: "UnsupportedAlgorithm".into(), msg: format!("Unknown alg: {}", alg).into() })
+        _ => Err(WebtokenError::UnsupportedAlgorithm(format!("Unknown alg: {}", alg).into()))
     }
 }
 
@@ -130,12 +130,11 @@ fn manage_cek_decrypt(alg: &str, enc: &str, key: &[u8], encrypted_key: &[u8], he
 fn encrypt_content(enc: &str, cek: &[u8], payload: &[u8], aad: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), WebtokenError> {
     match enc {
         "A128GCM" | "A192GCM" | "A256GCM" => {
-            let nonce = crypto::get_random_bytes(12)?;
-            let (ciphertext, tag) = crypto::aes_gcm_encrypt(cek, &nonce, payload, aad)?;
+            let (ciphertext, tag, nonce) = crypto::aes_gcm_encrypt(cek, None, payload, aad)?;
             Ok((ciphertext, tag, nonce))
         },
         "XC20P" => {
-            crypto::encrypt_xchacha20(cek, payload, aad)
+            crypto::encrypt_xchacha20(cek, payload, aad, None)
         },
         "A128CBC-HS256" | "A192CBC-HS384" | "A256CBC-HS512" => {
             // Composite Logic: [ MAC_KEY | ENC_KEY ]
@@ -170,7 +169,7 @@ fn encrypt_content(enc: &str, cek: &[u8], payload: &[u8], aad: &[u8]) -> Result<
 
             Ok((ciphertext, tag, nonce))
         },
-        _ => Err(WebtokenError::Custom { exc: "UnsupportedAlgorithm".into(), msg: format!("Unknown enc: {}", enc).into() })
+        _ => Err(WebtokenError::UnsupportedAlgorithm(format!("Unknown enc: {}", enc).into()))
     }
 }
 
@@ -214,7 +213,7 @@ fn decrypt_content(enc: &str, cek: &[u8], ciphertext: &[u8], aad: &[u8], nonce: 
             // Decrypt
             crypto::aes_cbc_decrypt(enc_key, nonce, ciphertext)
         },
-        _ => Err(WebtokenError::Custom { exc: "UnsupportedAlgorithm".into(), msg: format!("Unknown enc: {}", enc).into() })
+        _ => Err(WebtokenError::UnsupportedAlgorithm(format!("Unknown enc: {enc}").into()))
     }
 }
 
@@ -305,7 +304,7 @@ fn get_cek_length(enc: &str) -> Result<usize, WebtokenError> {
         "A128CBC-HS256" => Ok(32), // 16 MAC + 16 ENC
         "A192CBC-HS384" => Ok(48), // 24 MAC + 24 ENC
         "A256CBC-HS512" => Ok(64), // 32 MAC + 32 ENC
-        _ => Err(WebtokenError::Custom { exc: "UnsupportedEncryption".into(), msg: format!("Unknown enc: {}", enc).into() })
+        _ => Err(WebtokenError::UnsupportedEncryption(format!("Unknown enc: {enc}").into()))
     }
 }
 
@@ -314,7 +313,7 @@ fn get_key_wrap_length(alg: &str) -> Result<usize, WebtokenError> {
         "A128KW" => Ok(16),
         "A192KW" => Ok(24),
         "A256KW" => Ok(32),
-        _ => Err(WebtokenError::Custom { exc: "UnsupportedAlgorithm".into(), msg: format!("Unknown wrap alg: {}", alg).into() })
+        _ => Err(WebtokenError::UnsupportedAlgorithm(format!("Unknown wrap alg: {alg}", ).into()))
     }
 }
 
@@ -322,5 +321,5 @@ fn get_key_wrap_length(alg: &str) -> Result<usize, WebtokenError> {
 fn prepare_pbes2_params(_alg: &str, _headers: &mut Value) -> Result<(Vec<u8>, u32, usize), WebtokenError> {
     // Logic to parse/generate 'p2s', 'p2c' would go here
     // For now returning error to satisfy the compiler while keeping the structure for future implementation
-    Err(WebtokenError::Custom { exc: "UnsupportedAlgorithm".into(), msg: "PBES2 not fully implemented".into() })
+    Err(WebtokenError::UnsupportedAlgorithm(format!("PBES2 not fully implemented")))
 }
