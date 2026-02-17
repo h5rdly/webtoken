@@ -1,4 +1,5 @@
 ![Python Version](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-darkgreen?style=flat&logo=python&logoColor=blue)
+[![Tests](https://github.com/h5rdly/webtoken/actions/workflows/tests.yml/badge.svg)](https://github.com/h5rdly/webtoken/actions/workflows/tests.yml)
 
 # webtoken
 
