@@ -10,9 +10,8 @@ use pyo3::exceptions::{PyValueError, PyKeyError, PyTypeError};
 
 use pythonize::depythonize;
 
-use crate::{jwk, WebtokenError, PyJWTError, InvalidKeyError}; 
-use crate::algorithms::Algorithm;
-use crate::jwk::{extract_or_recover_rsa_components};
+use crate::{crypto, jwk, WebtokenError, PyJWTError, InvalidKeyError}; 
+
 
 create_exception!(toke, PyJWKSetError, PyJWTError); 
 create_exception!(toke, PyJWKError, PyJWTError);
@@ -234,7 +233,7 @@ impl PyJWK {
         let kty = self.key_type()?;
 
         if kty == "RSA" {
-            let comps = extract_or_recover_rsa_components(&self.inner)
+            let comps = jwk::extract_or_recover_rsa_components(&self.inner)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
             let int_cls = py.get_type::<PyInt>();
@@ -553,6 +552,54 @@ impl PyEllipticCurvePrivateNumbers {
 
 
 // --- Exposed Functions ---
+pub fn perform_signature_jwk(message: &[u8], key: &PyJWK, algorithm: &str) -> Result<Vec<u8>, WebtokenError> {
+    
+    // 1. Handle "ES256" vs "ES256K" logic based on curve parameter
+    let mut alg_compat_name = algorithm;
+    if algorithm == "ES256" {
+        if let Some(crv) = key.inner.get("crv").and_then(|v| v.as_str()) {
+            if crv == "secp256k1" {
+                alg_compat_name = "ES256K";
+            }
+        }
+    }
+
+    // 2. Extract key bytes
+    // 'to_key_bytes(false)' usually means "get private key bytes" (is_public=false)
+    let key_bytes = key.to_key_bytes(false)
+        .map_err(|e| WebtokenError::Generic(e.to_string()))?;
+
+    // 3. Delegate directly to crypto
+    // Arguments: (alg, key, message)
+    crypto::sign(alg_compat_name, &key_bytes, message)
+}
+
+
+pub fn perform_verification_jwk(payload: &[u8], signature: &[u8], jwk: &PyJWK, alg_name: &str) -> Result<bool, WebtokenError> {
+    
+    // 1. Handle "ES256" vs "ES256K" logic
+    let mut alg_compat_name = alg_name;
+    if alg_name == "ES256" {
+        if let Some(crv) = jwk.inner.get("crv").and_then(|v| v.as_str()) {
+            if crv == "secp256k1" {
+                alg_compat_name = "ES256K";
+            }
+        }
+    }
+
+    // 2. Extract key bytes
+    // 'to_key_bytes(true)' usually means "get public key bytes" (is_public=true)
+    let key_bytes = jwk.to_key_bytes(true)
+        .map_err(|e| WebtokenError::Generic(e.to_string()))?;
+
+    // 3. Delegate directly to crypto
+    // Arguments: (alg, key, message, signature)
+    match crypto::verify(alg_compat_name, &key_bytes, payload, signature) {
+        Ok(_) => Ok(true),
+        Err(WebtokenError::InvalidSignature) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
 
 pub fn from_jwk(jwk: &Bound<'_, PyAny>, algorithm_hint: &str) -> PyResult<PyJWK> {
 
@@ -584,46 +631,6 @@ pub fn from_jwk_set(data: &Bound<'_, PyAny>) -> PyResult<PyJWKSet> {
     }
 }
 
-
-pub fn perform_signature_jwk(message: &[u8], key: &PyJWK, algorithm: &str) -> Result<Vec<u8>, WebtokenError> {
-    
-    let mut alg_override = algorithm;
-    if algorithm == "ES256" {
-        if let Some(crv) = key.inner.get("crv").and_then(|v| v.as_str()) {
-            if crv == "secp256k1" {
-                alg_override = "ES256K";
-            }
-        }
-    }
-
-    if let Ok(alg) = alg_override.parse::<Algorithm>() {
-        let key_bytes = key.to_key_bytes(false).map_err(|e| WebtokenError::Generic(e.to_string()))?;
-        return alg.sign(message, &key_bytes);
-    }
-    
-    Err(WebtokenError::Generic(format!("Algorithm '{}' not supported (or key type mismatch)", algorithm)))
-}
-
-
-pub fn perform_verification_jwk(payload: &[u8], signature: &[u8], jwk: &PyJWK, alg_name: &str) -> Result<bool, WebtokenError> {
-    
-    let mut alg_override = alg_name;
-    if alg_name == "ES256" {
-        if let Some(crv) = jwk.inner.get("crv").and_then(|v| v.as_str()) {
-            if crv == "secp256k1" {
-                alg_override = "ES256K";
-            }
-        }
-    }
-
-    if let Ok(alg) = alg_override.parse::<Algorithm>() {
-        // [FIX] Pass public_only=true for verification (extract x/y even if d exists)
-        let bytes = jwk.to_key_bytes(true).map_err(|e| WebtokenError::Generic(e.to_string()))?;
-        return alg.verify(payload, signature, &bytes);
-    }
-    
-    Err(WebtokenError::Generic(format!("Algorithm '{}' not supported (or key type mismatch)", alg_name)))
-}
 
 
 pub fn register_jwk_module(py: Python, parent_module: &Bound<'_, PyModule>) -> PyResult<()> {   

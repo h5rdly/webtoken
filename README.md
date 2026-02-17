@@ -35,7 +35,7 @@ More under [benchmarks](https://github.com/h5rdly/toke/blob/main/benchmarks/).
 
 `pip install webtoken`
 
-- Developed on Linux / Python 3.13
+- Developed on Linux / Python 3.14
 - Tests are run on and wheels are available for Linux (+ Alpine) / Windows / MacOS / FreeBSD
 
 ##  Usage

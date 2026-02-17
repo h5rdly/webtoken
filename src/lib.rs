@@ -1,12 +1,11 @@
 use std::{
     str::from_utf8, 
-    time::{SystemTime, UNIX_EPOCH} , 
     collections::{HashSet, HashMap},
     sync::{OnceLock, RwLock}
 };
 
-use serde_json::{from_slice, from_str, to_vec, Value, Map, map::Entry};
-use serde::{Serialize, Deserialize};
+use serde_json::{from_slice, from_str, to_vec, Value, Map};
+use serde::{Deserialize};
 use base64::{Engine as _, engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}};
 use time::{OffsetDateTime, PrimitiveDateTime};
 
@@ -19,14 +18,16 @@ use pythonize::{depythonize, pythonize};
 
 mod algorithms; 
 mod crypto; 
+mod jwt;
 mod jwk;
 mod jws;
 mod jwe;
 mod py_utils;
+mod paseto;
 pub mod pyjwt_jwk_api;
 
-use algorithms::{perform_signature, perform_verification};
-use py_utils::decode_base64_permissive;
+
+use jwt::Validation;
 use pyjwt_jwk_api::{
     PyJWK, PyJWKSet, perform_signature_jwk, perform_verification_jwk, validate_key_properties, check_rsa_key_length};
 
@@ -36,6 +37,13 @@ macro_rules! err_loc {
     ($($arg:tt)*) => {
         format!("[{}:{}] {}", file!(), line!(), format!($($arg)*))
     };
+}
+
+#[macro_export]
+macro_rules! f {
+    ($($arg:tt)*) => {
+        format!($($arg)*)
+    }
 }
 
 macro_rules! exc {
@@ -76,27 +84,9 @@ pub enum WebtokenError {
     InvalidIssuer,
     InvalidAudience,
     InvalidAlgorithm,
-    InvalidToken,
+    InvalidToken(String),
     MissingRequiredClaim(String),
     DecodeError(String),
-}
-
-
-#[derive(Debug, Clone)]
-pub struct Validation {
-    pub leeway: u64,
-    pub required_spec_claims: HashSet<String>,
-    pub algorithms: Vec<String>,
-}
-
-impl Default for Validation {
-    fn default() -> Self {
-        Self {
-            leeway: 0,
-            required_spec_claims: HashSet::new(),
-            algorithms: vec!["HS256".to_string()],
-        }
-    }
 }
 
 
@@ -119,39 +109,19 @@ impl From<BytesOrString> for Vec<u8> {
 }
 
 
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-enum TokenPayload {
-    Claims(Value),
-    Raw(#[serde(with = "serde_bytes")] Vec<u8>),
-}
-
-#[derive(Debug, Serialize)]
-struct CompleteToken {
-    header: Value,
-    payload: TokenPayload,
-    #[serde(with = "serde_bytes")]
-    signature: Vec<u8>,
-}
-
-#[derive(Deserialize)]
-struct LenientHeader {
-    alg: String,
-}
-
 impl std::fmt::Display for WebtokenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WebtokenError::Generic(s) => write!(f, "{}", s),
             WebtokenError::Custom { exc, msg } => write!(f, "{}: {}", exc, msg),
-            WebtokenError::DecodeError(msg) => write!(f, "DecodeError: {}", msg),
+            WebtokenError::DecodeError(msg) => write!(f, "DecodeError: {msg}"),
             WebtokenError::InvalidSignature => write!(f, "Signature verification failed"),
             WebtokenError::ExpiredSignature => write!(f, "Signature has expired"),
             WebtokenError::ImmatureSignature => write!(f, "The token is not yet valid"),
             WebtokenError::InvalidIssuer => write!(f, "Invalid issuer"),
             WebtokenError::InvalidAudience => write!(f, "Invalid audience"),
             WebtokenError::InvalidAlgorithm => write!(f, "Algorithm not supported"),
-            WebtokenError::InvalidToken => write!(f, "Invalid token"),
+            WebtokenError::InvalidToken(msg) => write!(f, "InvalidTokenError: {msg}"),
             WebtokenError::MissingRequiredClaim(c) => write!(f, "Missing required claim: {}", c),
         }
     }
@@ -175,6 +145,7 @@ impl From<WebtokenError> for PyErr {
                     "ExpiredSignatureError" => ExpiredSignatureError::new_err(msg),
                     "ImmatureSignatureError" => ImmatureSignatureError::new_err(msg),
                     "InvalidKeyError" => InvalidKeyError::new_err(msg),
+                    "InvalidTokenError" => InvalidTokenError::new_err(msg),
                     "InvalidAlgorithmError" => InvalidAlgorithmError::new_err(msg),
                     _ => PyJWTError::new_err(msg),
                 }
@@ -186,7 +157,7 @@ impl From<WebtokenError> for PyErr {
             WebtokenError::InvalidIssuer => InvalidIssuerError::new_err("Invalid issuer"),
             WebtokenError::InvalidAudience => InvalidAudienceError::new_err("Invalid audience"),
             WebtokenError::InvalidAlgorithm => InvalidAlgorithmError::new_err("Algorithm not supported"),
-            WebtokenError::InvalidToken => InvalidTokenError::new_err("Invalid token"),
+            WebtokenError::InvalidToken(msg) => InvalidTokenError::new_err(msg),
             WebtokenError::MissingRequiredClaim(c) => MissingRequiredClaimError::new_err(c),
         }
     }
@@ -201,7 +172,7 @@ fn raise_missing_claim_error<T>(py: Python, claim: &str) -> PyResult<T> {
 }
 
 
-// --- Algorithm Registry ---
+// -- For external algos
 
 static ALGORITHM_REGISTRY: OnceLock<RwLock<HashMap<String, Py<PyAny>>>> = OnceLock::new();
 
@@ -210,96 +181,7 @@ fn get_registry() -> &'static RwLock<HashMap<String, Py<PyAny>>> {
 }
 
 
-#[pyfunction]
-#[pyo3(signature = (message, key, algorithm))]
-fn raw_sign(message: &[u8], key: &Bound<'_, PyAny>, algorithm: &str) -> PyResult<Vec<u8>> {
-    let key_bytes = get_key_bytes(key, algorithm, true, false)?;
-    
-    if let Ok(jwk) = key.extract::<PyJWK>() { 
-        return perform_signature_jwk(message, &jwk, algorithm).map_err(Into::into); 
-    }
-
-    perform_signature(message, &key_bytes, algorithm)
-        .map_err(|e| PyValueError::new_err(format!("{}", e)))
-}
-
-
-#[pyfunction]
-#[pyo3(signature = (message, signature, key, algorithm))]
-fn raw_verify(message: &[u8], signature: &[u8], key: &Bound<'_, PyAny>, algorithm: &str) -> PyResult<bool> {
-    let key_bytes = get_key_bytes(key, algorithm, false, false)?;
-    
-    if let Ok(jwk) = key.extract::<PyJWK>() { 
-        return perform_verification_jwk(message, signature, &jwk, algorithm).map_err(Into::into); 
-    }
-
-    perform_verification(message, signature, &key_bytes, algorithm)
-        .map_err(|e| PyValueError::new_err(format!("{}", e)))
-}
-
-
-#[pyfunction]
-#[pyo3(signature = (payload, key, algorithm="HS256", headers=None, sort_headers=true, check_length=false))] 
-fn sign(
-    payload: &Bound<'_, PyAny>, 
-    key: &Bound<'_, PyAny>, 
-    algorithm: &str, 
-    headers: Option<&Bound<'_, PyDict>>,
-    sort_headers: bool,
-    check_length: bool, 
-) -> PyResult<String> {
-    
-    let header_map = prepare_headers(algorithm, headers, sort_headers)?;
-    let payload_slice = payload.extract::<&[u8]>().map_err(|_| PyTypeError::new_err("Payload must be string or bytes"))?;
-
-    let (header_b64, payload_b64, signing_input) = jws::prepare_jws_parts(&header_map, &payload_slice).map_err(Into::<PyErr>::into)?;
-    let detached = header_map.get("b64") == Some(&Value::Bool(false));
-    let key_bytes = get_key_bytes(key, algorithm, true, check_length)?;
-
-    jws::sign_output(&signing_input, &header_b64, &payload_b64, &key_bytes, algorithm, detached)
-        .map_err(Into::into)
-}
-
-
-#[pyfunction]
-#[pyo3(signature = (token, key, algorithm))]
-fn verify(py: Python, token: &Bound<'_, PyAny>, key: &Bound<'_, PyAny>, algorithm: &str) -> PyResult<(Py<PyAny>, Py<PyBytes>)> {
-    let token_str = extract_token_str(token)?;
-    let alg_norm = algorithm.to_uppercase();
-    let key_bytes = get_key_bytes(key, &alg_norm, false, false)?;
-    
-    let (header, payload) = jws::verify_bytes(&token_str, &key_bytes, &alg_norm).map_err(Into::<PyErr>::into)?;
-    let py_header = pythonize::pythonize(py, &header).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok((py_header.unbind(), PyBytes::new(py, &payload).unbind()))
-}
-
-
-#[pyfunction]
-#[pyo3(signature = (key_data, algorithm=None))]
-fn load_jwk(key_data: &Bound<'_, PyAny>, algorithm: Option<String>) -> PyResult<PyJWK> {
-    crate::pyjwt_jwk_api::from_jwk(key_data, algorithm.as_deref().unwrap_or_default())
-}
-
-
-#[pyfunction]
-fn load_jwk_set(data: &Bound<'_, PyAny>) -> PyResult<PyJWKSet> {
-    crate::pyjwt_jwk_api::from_jwk_set(data)
-}
-
-
-#[pyfunction]
-pub fn register_algorithm(name: &str, provider: Py<PyAny>) {
-    let map_lock = get_registry();
-    let mut map = map_lock.write().unwrap(); 
-    map.insert(name.to_uppercase(), provider);
-}
-
-#[pyfunction]
-pub fn unregister_algorithm(name: &str) {
-    let map_lock = get_registry();
-    let mut map = map_lock.write().unwrap();
-    map.remove(&name.to_uppercase());
-}
+// -- Helpers 
 
 pub fn get_algorithm(py: Python, name: &str) -> Option<Py<PyAny>> {
     let map_lock = get_registry();
@@ -308,33 +190,9 @@ pub fn get_algorithm(py: Python, name: &str) -> Option<Py<PyAny>> {
 }
 
 
-// --- Helpers ---
-
-// [FIX] Simple string matching instead of jsonwebtoken Enum
 fn is_hmac(alg: &str) -> bool {
     let s = alg.to_uppercase();
     matches!(s.as_str(), "HS256" | "HS384" | "HS512" | "BLAKE2b512" | "BLAKE2b256")
-}
-
-// [FIX] Validate if algorithm is supported locally
-fn is_supported_algorithm(alg: &str) -> bool {
-    matches!(alg, 
-        "HS256" | "HS384" | "HS512" |
-        "BLAKE2b512" | "BLAKE2b256" |
-        "RS256" | "RS384" | "RS512" |
-        "PS256" | "PS384" | "PS512" |
-        "ES256" | "ES384" | "ES512" | "ES521" | "ES256K" |
-        "EDDSA" | "ED25519" | "EdDSA" | "Ed25519" |
-        "ML-DSA-65"
-    )
-}
-
-fn sort_map(map: &mut Map<String, Value>) {
-    let mut entries: Vec<(String, Value)> = std::mem::take(map).into_iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    for (k, v) in entries {
-        map.insert(k, v);
-    }
 }
 
 
@@ -361,18 +219,6 @@ pub fn looks_like_public_key(key: &Bound<'_, PyAny>) -> bool {
 }
 
 
-fn handle_detached_content(token: &str, content: Option<&[u8]>) -> PyResult<String> {
-    if let Some(c) = content {
-        let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() != 3 { return Err(DecodeError::new_err("Not enough segments")); }
-        Ok(format!("{}.{}.{}", parts[0], URL_SAFE_NO_PAD.encode(c), parts[2]))
-    } else { 
-        Ok(token.to_string()) 
-    }
-}
-
-
-
 fn peek_algorithm(token: &str) -> PyResult<String> {
     let part = token.split('.').next()
         .ok_or_else(|| PyValueError::new_err("Invalid Token Format"))?;
@@ -395,11 +241,7 @@ fn extract_token_str(token: &Bound<'_, PyAny>) -> PyResult<String> {
 }
 
 
-fn get_key_bytes(
-    key: &Bound<'_, PyAny>, 
-    alg_name: &str, 
-    is_signing: bool, 
-    check_length: bool
+fn get_key_bytes(key: &Bound<'_, PyAny>, alg_name: &str, is_signing: bool, check_length: bool
 ) -> PyResult<Vec<u8>> {
 
     // Handle PyJWK Object
@@ -443,7 +285,7 @@ fn get_key_bytes(
         }
     }
     
-    if is_supported_algorithm(alg_name) {
+    if algorithms::is_supported_algorithm(alg_name) {
         if is_hmac(alg_name) {
             if bytes_look_like_public_key(key_slice) { 
                 return Err(InvalidKeyError::new_err("The specified key is an asymmetric key or x509 certificate and should not be used as an HMAC secret.")); 
@@ -474,9 +316,7 @@ fn get_key_bytes(
 }
 
 
-fn extract_aud_iss(
-    audience: Option<&Bound<'_, PyAny>>,
-    issuer: Option<&Bound<'_, PyAny>>
+fn extract_aud_iss(audience: Option<&Bound<'_, PyAny>>, issuer: Option<&Bound<'_, PyAny>>
 ) -> PyResult<(Option<HashSet<String>>, Option<HashSet<String>>)> {
     
     let expected_aud = if let Some(aud) = audience {
@@ -512,59 +352,6 @@ fn extract_aud_iss(
     Ok((expected_aud, expected_iss))
 }
 
-
-fn is_numeric(v: &Value) -> bool {
-    if v.is_number() { return true; }
-    if let Some(s) = v.as_str() {
-        return s.parse::<f64>().is_ok();
-    }
-    false
-}
-
-fn get_numeric_date(v: &Value) -> Option<f64> {
-    if let Some(n) = v.as_f64() { return Some(n); }
-    if let Some(s) = v.as_str() { return s.parse::<f64>().ok(); }
-    None
-}
-
-
-fn prepare_headers(algorithm: &str, headers: Option<&Bound<'_, PyDict>>, sort_headers: bool) -> PyResult<Map<String, Value>> {
-
-    let mut header_map = match headers {
-        Some(h) => depythonize(h).map_err(|e| PyTypeError::new_err(format!("Invalid header: {}", e)))?,
-        None => Map::new() 
-    };
-
-    if !header_map.contains_key("alg") {
-        header_map.insert("alg".to_string(), Value::String(algorithm.to_string()));
-    }
-
-    if header_map.get("kid").is_some_and(|kid| !kid.is_string()) {
-        return Err(InvalidTokenError::new_err("Key ID header parameter must be a string"));
-    }
-
-    if let Some(Value::Bool(true)) = header_map.get("b64") {
-        header_map.remove("b64");   // RFC 7797: If b64 is True (default), it can be omitted
-    }
-
-    match header_map.entry("typ") {
-        Entry::Occupied(entry) => {
-            let val = entry.get();
-            if val.is_null() || val.as_str().is_some_and(|s| s.is_empty()) {
-                entry.remove_entry();
-            }
-        }
-        Entry::Vacant(entry) => {
-            entry.insert(Value::String("JWT".to_string()));
-        }
-    }
-
-    if sort_headers {
-        sort_map(&mut header_map);
-    }
-
-    Ok(header_map)
-}
 
 
 fn prepare_validation(
@@ -618,336 +405,156 @@ fn prepare_validation(
 }
 
 
-fn validate_claims_content(claims: &Value, validation: &Validation, check_exp: bool, check_nbf: bool,
-    check_aud: bool, check_iss: bool, check_sub: bool, strict_aud: bool, 
-    expected_aud: &Option<HashSet<String>>, expected_iss: &Option<HashSet<String>>, expected_sub: &Option<String>
-) -> Result<(), WebtokenError> {
+// -- Python API
+
+#[pyfunction]
+#[pyo3(signature = (message, key, algorithm))]
+fn raw_sign(message: &[u8], key: &Bound<'_, PyAny>, algorithm: &str) -> PyResult<Vec<u8>> {
+    let key_bytes = get_key_bytes(key, algorithm, true, false)?;
     
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as f64;
-    
-    for (claim, err) in [
-        ("exp", WebtokenError::Custom{ exc: "DecodeError".into(), msg: "exp must be a number".into() }),
-        ("iat", WebtokenError::Custom{ exc: "InvalidIssuedAtError".into(), msg: "iat must be a number".into() }),
-        ("nbf", WebtokenError::Custom{ exc: "DecodeError".into(), msg: "nbf must be a number".into() })
-    ] {
-        if let Some(val) = claims.get(claim) {
-            if !is_numeric(val) { return Err(err); }
-        }
+    if let Ok(jwk) = key.extract::<PyJWK>() { 
+        return perform_signature_jwk(message, &jwk, algorithm).map_err(Into::into); 
     }
 
-    if check_exp {
-        if let Some(val) = claims.get("exp") {
-            if let Some(exp) = get_numeric_date(val) {
-                if exp < (now - (validation.leeway as f64)) {
-                    return Err(WebtokenError::ExpiredSignature);
-                }
-            }
-        } else if validation.required_spec_claims.contains("exp") {
-             return Err(WebtokenError::MissingRequiredClaim("exp".to_string()));
-        }
-    }
-
-    if check_nbf {
-        if let Some(val) = claims.get("nbf") {
-            if let Some(nbf) = get_numeric_date(val) {
-                if nbf > (now + (validation.leeway as f64)) {
-                    return Err(WebtokenError::ImmatureSignature);
-                }
-            }
-        }
-    }
-
-    if check_iss {
-        if let Some(expected_issuers) = expected_iss {
-            let token_iss_val = claims.get("iss");
-            match token_iss_val {
-                Some(Value::String(iss)) => {
-                    if !expected_issuers.contains(iss) { return Err(WebtokenError::InvalidIssuer); }
-                },
-                Some(_) => return Err(WebtokenError::InvalidIssuer), 
-                None => { return Err(WebtokenError::MissingRequiredClaim("iss".to_string())); }
-            }
-        } else if claims.get("iss").is_none() && validation.required_spec_claims.contains("iss") {
-             return Err(WebtokenError::MissingRequiredClaim("iss".to_string()));
-        } else if let Some(iss_val) = claims.get("iss") {
-             if !iss_val.is_string() { return Err(WebtokenError::InvalidIssuer); }
-        }
-    }
-
-    if check_aud {
-        let token_aud_val = claims.get("aud");
-        if let Some(expected_auds) = expected_aud {
-            
-            if strict_aud {
-                if expected_auds.len() != 1 {
-                     return Err(WebtokenError::Custom{ exc: "InvalidAudienceError".into(), msg: "Invalid audience (strict)".into() });
-                }
-                match token_aud_val {
-                    Some(Value::Array(_)) => return Err(WebtokenError::Custom{ exc: "InvalidAudienceError".into(), msg: "Invalid claim format in token (strict)".into() }),
-                    Some(Value::String(s)) => {
-                        if !expected_auds.contains(s) { return Err(WebtokenError::Custom{ exc: "InvalidAudienceError".into(), msg: "Audience doesn't match (strict)".into() }); }
-                    },
-                    Some(Value::Null) | None => {},
-                    _ => return Err(WebtokenError::Custom{ exc: "InvalidAudienceError".into(), msg: "Invalid claim format in token (strict)".into() }),
-                }
-            } else {
-                if token_aud_val.is_none() || token_aud_val == Some(&Value::Null) {
-                    return Err(WebtokenError::MissingRequiredClaim("aud".to_string()));
-                }
-                let token_auds: Vec<String> = match token_aud_val {
-                    Some(Value::String(s)) => vec![s.clone()],
-                    Some(Value::Array(arr)) => {
-                        let mut strs = Vec::new();
-                        for v in arr {
-                            if let Some(s) = v.as_str() { strs.push(s.to_string()); } 
-                            else { return Err(WebtokenError::Custom{ exc: "InvalidAudienceError".into(), msg: "Invalid claim format in token".into() }); }
-                        }
-                        strs
-                    },
-                    Some(_) => { return Err(WebtokenError::Custom{ exc: "InvalidAudienceError".into(), msg: "Invalid claim format in token".into() }); },
-                    None => Vec::new(), 
-                };
-                if !token_auds.iter().any(|ta| expected_auds.contains(ta)) {
-                    return Err(WebtokenError::InvalidAudience);
-                }
-            }
-        } else if let Some(val) = token_aud_val {
-             let is_truthy = match val { Value::Null => false, Value::String(s) => !s.is_empty(), Value::Array(a) => !a.is_empty(), Value::Bool(b) => *b, _ => true, };
-             if is_truthy { return Err(WebtokenError::InvalidAudience); }
-        } else if validation.required_spec_claims.contains("aud") {
-             return Err(WebtokenError::MissingRequiredClaim("aud".to_string()));
-        }
-    }
-
-    if check_sub {
-        let sub_val = claims.get("sub");
-        if let Some(expected) = expected_sub {
-            match sub_val {
-                Some(Value::String(s)) => {
-                    if s != expected { return Err(WebtokenError::Custom{ exc: "InvalidSubjectError".into(), msg: "Invalid subject".into() }); }
-                },
-                Some(_) => return Err(WebtokenError::Custom{ exc: "InvalidSubjectError".into(), msg: "Invalid subject: must be a string".into() }),
-                None => {} 
-            }
-        }
-        if let Some(v) = sub_val {
-            if !v.is_string() { return Err(WebtokenError::Custom{ exc: "InvalidSubjectError".into(), msg: "Invalid subject: must be a string".into() }); }
-        }
-    }
-    
-    if let Some(jti) = claims.get("jti") {
-        if !jti.is_string() { return Err(WebtokenError::Custom{ exc: "InvalidJTIError".into(), msg: "Invalid jti: must be a string".into() }); }
-    }
-    
-    for req in &validation.required_spec_claims {
-        if !claims.get(req).is_some() { return Err(WebtokenError::MissingRequiredClaim(req.clone())); }
-    }
-    Ok(())
+    crypto::sign(algorithm, &key_bytes, message)
+        .map_err(|e| PyValueError::new_err(format!("{}", e)))
 }
 
 
-fn decode_impl(token: String, key_bytes: Option<Vec<u8>>, validation: Validation, verify: bool,
-    check_iat: bool, check_exp: bool, check_nbf: bool, check_aud: bool, check_iss: bool, check_sub: bool,
-    strict_aud: bool, expected_aud: Option<HashSet<String>>, expected_iss: Option<HashSet<String>>,
-    expected_sub: Option<String>, detached_content: Option<&[u8]>, convert_to_json: bool,
-) -> Result<TokenPayload, WebtokenError> {
-
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 { return Err(WebtokenError::Generic("Invalid Token Format".into())); }
-
-    let header_bytes = decode_base64_permissive(parts[0].as_bytes())
-        .map_err(|_| WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid header padding".into() })?;
-
-    let mut header_val: Value = from_slice(&header_bytes)
-        .map_err(|e| WebtokenError::Custom { exc: "DecodeError".into(), msg: format!("Invalid header string: {}", e) })?;
-
-    if !header_val.is_object() {
-        return Err(WebtokenError::Custom { 
-            exc: "DecodeError".into(), 
-            msg: "Invalid header string: must be a json object".into() 
-        });
-    }
-
-    if let Some(val) = header_val.get("b64") {
-        if let Some(b) = val.as_bool() {
-            if !b {
-                if detached_content.is_none() {
-                    return Err(WebtokenError::Custom { 
-                        exc: "DecodeError".into(), 
-                        msg: "It is required that you pass in a value for the \"detached_payload\" argument to decode a message having the b64 header set to false.".into() 
-                    });
-                }
-                if let Some(obj) = header_val.as_object_mut() {
-                    obj.remove("b64");
-                }
-            }
-        } else {
-             return Err(WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid b64 header: must be boolean".into() });
-        }
-    }
-
-    if header_val.get("alg").is_none() {
-        return Err(WebtokenError::Custom { 
-            exc: "InvalidAlgorithmError".into(), 
-            msg: "Missing 'alg' in header".into() 
-        });
-    }
-
-    let header: LenientHeader = serde_json::from_value(header_val.clone())
-        .map_err(|e| WebtokenError::Custom { exc: "DecodeError".into(), msg: format!("Invalid header string: {}", e) })?;
+#[pyfunction]
+#[pyo3(signature = (message, signature, key, algorithm))]
+fn raw_verify(message: &[u8], signature: &[u8], key: &Bound<'_, PyAny>, algorithm: &str) -> PyResult<bool> {
+    let key_bytes = get_key_bytes(key, algorithm, false, false)?;
     
-    let alg_norm = header.alg.clone();
-
-    if verify {
-       if !is_supported_algorithm(&alg_norm) {
-            return Err(WebtokenError::InvalidAlgorithm);
-       }
-       if !validation.algorithms.iter().any(|a| a == &alg_norm) {
-             return Err(WebtokenError::InvalidAlgorithm);
-        }
+    if let Ok(jwk) = key.extract::<PyJWK>() { 
+        return perform_verification_jwk(message, signature, &jwk, algorithm).map_err(Into::into); 
     }
 
-    let payload_bytes = decode_base64_permissive(parts[1].as_bytes())
-        .map_err(|_| WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid payload padding".into() })?;
-
-    if verify {
-        let key = key_bytes.ok_or_else(|| WebtokenError::Generic("Key required for verification".to_string()))?;
-        let signature_bytes = decode_base64_permissive(parts[2].as_bytes())
-            .map_err(|_| WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid crypto padding".into() })?;
-        let signing_input = format!("{}.{}", parts[0], parts[1]);
-        
-       let valid = algorithms::perform_verification(&signing_input.as_bytes(), &signature_bytes, &key, &alg_norm)?;
-
-        if !valid {
-             return Err(WebtokenError::InvalidSignature);
-        }
+    match crypto::verify(algorithm, &key_bytes, message, signature) {
+        Ok(_) => Ok(true),
+        Err(WebtokenError::InvalidSignature) => Ok(false),
+        Err(e) => Err(PyValueError::new_err(format!("{}", e))),
     }
+}
 
-    if !convert_to_json {
-        return Ok(TokenPayload::Raw(payload_bytes));
-    }
 
-    let claims: Value = from_slice(&payload_bytes).map_err(|_| WebtokenError::Custom { 
-        exc: "DecodeError".into(), 
-        msg: "Invalid payload string: must be a json object".into() 
-    })?;
-
-    if !claims.is_object() {
-        return Err(WebtokenError::Custom { 
-            exc: "DecodeError".into(), 
-            msg: "Invalid payload string: must be a json object".into() 
-        });
-    }
-
-    validate_claims_content(&claims, &validation, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud, &expected_aud, &expected_iss, &expected_sub)?;
+#[pyfunction]
+#[pyo3(signature = (payload, key, algorithm="HS256", headers=None, sort_headers=true, check_length=false))] 
+fn sign(
+    payload: &Bound<'_, PyAny>, 
+    key: &Bound<'_, PyAny>, 
+    algorithm: &str, 
+    headers: Option<&Bound<'_, PyDict>>,
+    sort_headers: bool,
+    check_length: bool, 
+) -> PyResult<String> {
     
-    if check_iat {
-            if let Some(val) = claims.get("iat") {
-                if let Some(iat) = get_numeric_date(val) {
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as f64;
-                    if iat > (now + (validation.leeway as f64)) {
-                        return Err(WebtokenError::ImmatureSignature);
-                    }
-                }
-            }
-    }
-    Ok(TokenPayload::Claims(claims))
-} 
-   
+    let initial_header_map = match headers {
+        Some(h) => depythonize(h).map_err(|e| PyTypeError::new_err(format!("Invalid header: {}", e)))?,
+        None => Map::new() 
+    };
+    let header_map = jwt::prepare_headers(algorithm, initial_header_map, sort_headers)?;
+    let payload_slice = payload.extract::<&[u8]>().map_err(|_| PyTypeError::new_err("Payload must be string or bytes"))?;
 
-fn decode_complete_impl(
-    token: String, key_bytes: Option<Vec<u8>>, validation: Validation, verify: bool, check_iat: bool, 
-    check_exp: bool, check_nbf: bool, check_aud: bool, check_iss: bool, check_sub: bool, strict_aud: bool,
-    aud: Option<HashSet<String>>, iss: Option<HashSet<String>>, sub: Option<String>, detached_content: Option<&[u8]>,
-    convert_to_json: bool,
-) -> Result<CompleteToken, WebtokenError> {
+    let (header_b64, payload_b64, signing_input) = jws::prepare_jws_parts(&header_map, &payload_slice).map_err(Into::<PyErr>::into)?;
+    let detached = header_map.get("b64") == Some(&Value::Bool(false));
+    let key_bytes = get_key_bytes(key, algorithm, true, check_length)?;
 
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 { 
-        return Err(WebtokenError::Custom { exc: "DecodeError".into(), msg: "Not enough segments".into() }); 
-    }
-    let header_bytes = decode_base64_permissive(parts[0].as_bytes())
-        .map_err(|_| WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid header padding".into() })?;
-    
-    let mut header_val: Value = from_slice(&header_bytes)
-        .map_err(|e| WebtokenError::Custom { exc: "DecodeError".into(), msg: format!("Invalid header string: {}", e) })?;
-    
-    if let Some(val) = header_val.get("b64") {
-         if let Some(b) = val.as_bool() {
-             if !b {
-                  if detached_content.is_none() {
-                       return Err(WebtokenError::Custom { 
-                           exc: "DecodeError".into(), 
-                           msg: "It is required that you pass in a value for the \"detached_payload\" argument to decode a message having the b64 header set to false.".into() 
-                       });
-                  }
-                  if let Some(obj) = header_val.as_object_mut() { obj.remove("b64"); }
-             }
-         }
-    }
-    let payload = decode_impl(token.clone(), key_bytes, validation, verify, check_iat, 
-    check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud, aud, iss, sub, detached_content, 
-    convert_to_json)?;
-    
-    let signature = decode_base64_permissive(parts[2].as_bytes()).unwrap_or_default();
+    jws::sign_output(&signing_input, &header_b64, &payload_b64, &key_bytes, algorithm, detached)
+        .map_err(Into::into)
+}
 
-    Ok(CompleteToken { 
-        header: header_val, 
-        payload, 
-        signature 
-    })
+
+#[pyfunction]
+#[pyo3(signature = (token, key, algorithm))]
+fn verify(py: Python, token: &Bound<'_, PyAny>, key: &Bound<'_, PyAny>, algorithm: &str) -> PyResult<(Py<PyAny>, Py<PyBytes>)> {
+    let token_str = extract_token_str(token)?;
+    let alg_norm = algorithm.to_uppercase();
+    let key_bytes = get_key_bytes(key, &alg_norm, false, false)?;
+    
+    let (header, payload) = jws::verify_bytes(&token_str, &key_bytes, &alg_norm).map_err(Into::<PyErr>::into)?;
+    let py_header = pythonize::pythonize(py, &header).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok((py_header.unbind(), PyBytes::new(py, &payload).unbind()))
+}
+
+
+#[pyfunction]
+#[pyo3(signature = (key_data, algorithm=None))]
+fn load_jwk(key_data: &Bound<'_, PyAny>, algorithm: Option<String>) -> PyResult<PyJWK> {
+    crate::pyjwt_jwk_api::from_jwk(key_data, algorithm.as_deref().unwrap_or_default())
+}
+
+
+#[pyfunction]
+fn load_jwk_set(data: &Bound<'_, PyAny>) -> PyResult<PyJWKSet> {
+    crate::pyjwt_jwk_api::from_jwk_set(data)
+}
+
+
+#[pyfunction]
+pub fn register_algorithm(name: &str, provider: Py<PyAny>) {
+    let map_lock = get_registry();
+    let mut map = map_lock.write().unwrap(); 
+    map.insert(name.to_uppercase(), provider);
+}
+
+
+#[pyfunction]
+pub fn unregister_algorithm(name: &str) {
+    let map_lock = get_registry();
+    let mut map = map_lock.write().unwrap();
+    map.remove(&name.to_uppercase());
 }
 
 
 #[pyfunction(name = "decode_complete")]
 #[pyo3(signature = (token, key=None, algorithms=None, options=None, audience=None, issuer=None, subject=None, verify=true, content=None, return_dict=true, leeway=0.0))]
 fn decode_complete<'py>(
-    py: Python<'py>, token: &Bound<'py, PyAny>, key: Option<&Bound<'py, PyAny>>, 
-    algorithms: Option<Vec<String>>, options: Option<&Bound<'py, PyDict>>, 
-    audience: Option<&Bound<'py, PyAny>>, issuer: Option<&Bound<'py, PyAny>>, 
-    subject: Option<String>, verify: Option<bool>, content: Option<&[u8]>, return_dict: bool, leeway: f64
+    py: Python<'py>, 
+    token: &Bound<'py, PyAny>, 
+    key: Option<&Bound<'py, PyAny>>, 
+    algorithms: Option<Vec<String>>, 
+    options: Option<&Bound<'py, PyDict>>, 
+    audience: Option<&Bound<'py, PyAny>>, 
+    issuer: Option<&Bound<'py, PyAny>>, 
+    subject: Option<String>, 
+    verify: Option<bool>, 
+    content: Option<&[u8]>, 
+    return_dict: bool, 
+    leeway: f64
 ) -> PyResult<Bound<'py, PyAny>> {
 
     let token_str = extract_token_str(token)?;
-    let alg_str = peek_algorithm(&token_str).unwrap_or_else(|_| "HS256".to_string());
+    let token_final = jwt::handle_detached_content(&token_str, content).map_err(Into::<PyErr>::into)?;
+    let alg_str = peek_algorithm(&token_final).unwrap_or_else(|_| "HS256".to_string());
     
     let mut effective_verify = verify.unwrap_or(true);
-    let mut check_length = false; // Default false
+    let mut check_length = false; 
     if let Some(opts) = options {
-        if let Ok(Some(v)) = opts.get_item("verify_signature") { if let Ok(b) = v.extract::<bool>() { effective_verify = b; } }
-        if let Ok(Some(v)) = opts.get_item("enforce_minimum_key_length") { if let Ok(b) = v.extract::<bool>() { check_length = b; } }
+        if let Ok(Some(v)) = opts.get_item("verify_signature") && let Ok(ver_sig) = v.extract::<bool>() { 
+            effective_verify = ver_sig;
+        }
+        if let Ok(Some(v)) = opts.get_item("enforce_minimum_key_length") && let Ok(min_key) = v.extract::<bool>() { 
+                check_length = min_key; 
+        }
     }
 
+    // Validate 'algorithms' Argument
     if effective_verify && algorithms.is_none() {
         let is_jwk = if let Some(k) = key { k.extract::<PyJWK>().is_ok() } else { false };
-        if !is_jwk { return Err(DecodeError::new_err("It is required that you pass in a value for the \"algorithms\" argument when calling decode().")); }
+        if !is_jwk { 
+            return Err(DecodeError::new_err("It is required that you pass in a value for the \"algorithms\" argument when calling decode().")); 
+        }
     }
 
-    let token_final = handle_detached_content(&token_str, content)?;
-
+    // 'none' Algorithm Check
     if alg_str.eq_ignore_ascii_case("none") {
         if effective_verify {
             return Err(DecodeError::new_err("Signature verification failed"));
         }
-        // If verify=False, we proceed without checking the 'algorithms' list, as per PyJWT behavior
-        let parts: Vec<&str> = token_final.split('.').collect();
-        if parts.len() < 2 { return Err(DecodeError::new_err("Invalid Token Format")); }
-
-        let header_json = URL_SAFE_NO_PAD.decode(parts[0]).map_err(|e| DecodeError::new_err(format!("Invalid header padding: {}", e)))?;
-        let header_val: Value = from_slice(&header_json).map_err(|e| DecodeError::new_err(format!("Invalid header: {}", e)))?;
-        
-        let payload_bytes = decode_base64_permissive(parts[1].as_bytes()).map_err(|e| DecodeError::new_err(format!("Invalid payload padding: {}", e)))?;
-        
-        let payload = if let Ok(json) = from_slice(&payload_bytes) { 
-            TokenPayload::Claims(json) 
-        } else { 
-            TokenPayload::Raw(payload_bytes) 
-        };
-        
-        let complete = CompleteToken { header: header_val, payload, signature: Vec::new() };
-        return pythonize(py, &complete).map_err(|e| PyValueError::new_err(e.to_string()));
     }
 
+    // HMAC Key Check
     if alg_str.starts_with("HS") {
         if let Some(k) = key && looks_like_public_key(k) {
                  return Err(InvalidKeyError::new_err("The specified key is an asymmetric key or x509 certificate and \
@@ -955,20 +562,35 @@ fn decode_complete<'py>(
         }
     }
 
+    // Prepare Validation & Flags
     let (validation, check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud)
         = prepare_validation(algorithms.clone(), options, verify, leeway)?;
     
     let (expected_aud, expected_iss) = extract_aud_iss(audience, issuer)?;
 
-    let decoding_key_bytes = if effective_verify {
+    // Load Key Bytes
+    let decoding_key_bytes = if effective_verify && !alg_str.eq_ignore_ascii_case("none") {
         match key { 
             Some(k) => Some(get_key_bytes(k, &alg_str, false, check_length)?), 
             None => return Err(PyValueError::new_err("Key required")) 
         }
-    } else { None };
+    } else { 
+        None 
+    };
 
     let result = py.detach(move || {
-        decode_complete_impl(token_final, decoding_key_bytes, validation, effective_verify, check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud, expected_aud, expected_iss, subject, content, return_dict)
+        crate::jwt::decode(
+            token_final, 
+            decoding_key_bytes, 
+            validation, 
+            effective_verify, 
+            // Flags
+            (check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud), 
+            // Expected Values
+            (expected_aud, expected_iss, subject),
+            content, 
+            return_dict
+        )
     });
 
     match result {
@@ -1022,7 +644,12 @@ fn encode(
         claims_map.insert(key_str.to_string(), value_json);
     }
 
-    let header_map = prepare_headers(algorithm, headers, sort_headers)?;
+    let initial_header_map = match headers {
+        Some(h) => depythonize(h).map_err(|e| PyTypeError::new_err(format!("Invalid header: {}", e)))?,
+        None => Map::new() 
+    };
+
+    let header_map = jwt::prepare_headers(algorithm, initial_header_map, sort_headers)?;
     let payload_bytes = to_vec(&claims_map).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let (header_b64, payload_b64, signing_input) = jws::prepare_jws_parts(&header_map, &payload_bytes)
@@ -1071,27 +698,53 @@ fn decode<'py>(
 
 
 #[pyfunction]
-#[pyo3(signature = (payload, key, alg="dir", enc="XC20P"))]
-fn encrypt(payload: BytesOrString, key: &[u8], alg: &str, enc: &str) -> PyResult<String> {
-
+#[pyo3(signature = (payload, key, alg="dir", enc="XC20P", extra_headers=None))]
+fn encrypt(payload: BytesOrString, key: &[u8], alg: &str, enc: &str, extra_headers: Option<String>) -> PyResult<String> {
     let payload_bytes: Vec<u8> = payload.into();
-        
-     if alg == "dir" && enc == "XC20P" {
-        return jwe::encode_xc20p(&payload_bytes, key).map_err(PyErr::from);
-    }
     
-    Err(PyValueError::new_err(format!("Unsupported JWE algorithm/encryption pair: alg='{}' enc='{}'", 
-        alg, enc
-    )))
+    // Construct the protected header
+    let mut protected_header = serde_json::json!({
+        "alg": alg,
+        "enc": enc,
+        "typ": "JWT"
+    });
+
+    // Merge extra headers if provided
+    if let Some(extra_json) = extra_headers {
+        if let Ok(extra) = serde_json::from_str::<serde_json::Value>(&extra_json) {
+            if let Some(obj) = protected_header.as_object_mut() {
+                if let Some(extra_obj) = extra.as_object() {
+                    for (k, v) in extra_obj {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    jwe::encrypt_compact(&protected_header, &payload_bytes, key).map_err(PyErr::from)
+}
+
+#[pyfunction]
+fn decrypt<'py>(py: Python<'py>, token: &str, key: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    let payload = jwe::decrypt_compact(token, key).map_err(PyErr::from)?;
+    Ok(PyBytes::new(py, &payload))
 }
 
 
 #[pyfunction]
-fn decrypt<'py>(py: Python<'py>, token: &str, key: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+#[pyo3(signature = (protected, payload, key))]
+fn encrypt_compact(protected: String, payload: &[u8], key: &[u8]) -> PyResult<String> {
+    let headers: serde_json::Value = serde_json::from_str(&protected)
+        .map_err(|e| PyValueError::new_err(format!("Invalid JSON headers: {}", e)))?;
+        
+    jwe::encrypt_compact(&headers, payload, key).map_err(PyErr::from)
+}
 
-    // Direct mode only 
-    let payload = jwe::decode_xc20p(token, key).map_err(PyErr::from)?;
 
+#[pyfunction]
+fn decrypt_compact<'py>(py: Python<'py>, token: &str, key: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    let payload = jwe::decrypt_compact(token, key).map_err(PyErr::from)?;
     Ok(PyBytes::new(py, &payload))
 }
 
@@ -1107,12 +760,10 @@ fn base64url_decode_inner(input: &str) -> Result<Vec<u8>, String> {
 #[pyfunction]
 #[pyo3(signature = (token))]
 fn get_unverified_header<'py>(py: Python<'py>, token: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+
     let token_str = extract_token_str(token)?;
-    
     let part = token_str.split('.').next().ok_or_else(|| DecodeError::new_err("Invalid Token Format"))?;
-    
     let bytes = base64url_decode_inner(part).map_err(|_| DecodeError::new_err("Invalid header padding"))?;
-    
     let val: Value = from_slice(&bytes).map_err(|e| DecodeError::new_err(format!("Invalid header string: {}", e)))?;
 
     // PyJWT wants 'kid' to be a string if present, even for unverified headers
@@ -1128,7 +779,9 @@ fn get_unverified_header<'py>(py: Python<'py>, token: &Bound<'py, PyAny>) -> PyR
 #[pyfunction]
 fn unsafe_peek<'py>(py: Python<'py>, token: &str) -> PyResult<Bound<'py, PyAny>> {
     let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() < 2 { return Err(PyValueError::new_err("Invalid Token Format")); }
+    if parts.len() < 2 { 
+        return Err(PyValueError::new_err("Invalid Token Format")); 
+    }
     let payload_bytes = base64url_decode_inner(parts[1]).map_err(|_| PyValueError::new_err("Invalid Payload Base64"))?;
     let claims: Value = from_slice(&payload_bytes).map_err(|_| PyValueError::new_err("Invalid Payload JSON"))?;
     Ok(pythonize(py, &claims).unwrap())
@@ -1152,9 +805,11 @@ fn validate_claims(
     verify: Option<bool>,
     leeway: f64
 ) -> PyResult<()> {
+    // 1. Convert Python Dict to Serde Value
     let claims_val: Value = depythonize(claims).map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    let (mut validation, _, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud) 
+    // 2. Prepare Validation & Flags
+    let (mut validation, check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud) 
         = prepare_validation(None, options, verify, leeway)?;
     
     if validation.leeway == 0 && leeway > 0.0 {
@@ -1163,15 +818,22 @@ fn validate_claims(
 
     let (expected_aud, expected_iss) = extract_aud_iss(audience, issuer)?;
 
-    let result = validate_claims_content(
-        &claims_val, &validation, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud,
-        &expected_aud, &expected_iss, &subject
+    // 3. Call the logic in jwt.rs (using the new tuple signature)
+    let result = crate::jwt::validate_claims(
+        &claims_val, 
+        &validation, 
+        // Group 1: Flags
+        (check_iat, check_exp, check_nbf, check_aud, check_iss, check_sub, strict_aud),
+        // Group 2: Expected Values
+        (&expected_aud, &expected_iss, &subject)
     );
 
+    // 4. Handle Result & Fix Type Inference Error (E0282)
     match result {
         Ok(_) => Ok(()),
         Err(e) => {
-            Err(e.into())
+            // Fix type inference by explicitly using PyErr::from
+            Err(PyErr::from(e)) 
         }
     }
 }
@@ -1179,26 +841,109 @@ fn validate_claims(
 
 #[pyfunction]
 fn load_key_from_pem(key_data: BytesOrString) -> PyResult<PyJWK> {
+
     let pem_bytes: Vec<u8> = key_data.into();
-      
     let json_str = crate::jwk::pem_to_jwk(&pem_bytes).map_err(|e| PyValueError::new_err(e))?;
     let val: serde_json::Value = from_str(&json_str).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let alg = val.get("alg").and_then(|s| s.as_str()).map(|s| s.to_string());
+
     Ok(PyJWK { inner: val, algorithm_name: alg })
 }
 
+
+
+#[pyfunction]
+#[pyo3(signature = (key, payload, purpose="local", footer=None, implicit_assertion=None))]
+fn paseto_encode(
+    key: BytesOrString, 
+    payload: &Bound<'_, PyAny>,
+    purpose: &str,
+    footer: Option<&[u8]>,
+    implicit_assertion: Option<&[u8]>
+) -> PyResult<String> {
+    // 1. Process Key
+    let key_bytes: Vec<u8> = key.into();
+
+    // 2. Serialize Payload (Python Object -> Rust Serde Value -> JSON Bytes)
+    let data: Value = depythonize(payload).map_err(|e| PyValueError::new_err(format!("Serialization failed: {}", e)))?;
+    let payload_bytes = to_vec(&data).map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // 3. Dispatch based on purpose
+    match purpose {
+        "local" => {
+            crate::paseto::encrypt_v4_local(&payload_bytes, &key_bytes, footer, implicit_assertion)
+                .map_err(PyErr::from)
+        },
+        "public" => {
+            crate::paseto::sign_v4_public(&payload_bytes, &key_bytes, footer, implicit_assertion)
+                .map_err(PyErr::from)
+        },
+        _ => Err(PyValueError::new_err("Purpose must be 'local' or 'public'"))
+    }
+}
+
+
+#[pyfunction]
+#[pyo3(signature = (key, token, purpose="local", implicit_assertion=None))]
+fn paseto_decode<'py>(
+    py: Python<'py>,
+    key: BytesOrString,
+    token: &str,
+    purpose: &str,
+    implicit_assertion: Option<&[u8]>
+) -> PyResult<Bound<'py, PyAny>> {
+    // 1. Process Key
+    let key_bytes: Vec<u8> = key.into();
+
+    // 2. Decode & Verify
+    let (payload_bytes, _footer) = match purpose {
+        "local" => {
+             crate::paseto::decrypt_v4_local(token, &key_bytes, implicit_assertion)
+                .map_err(PyErr::from)?
+        },
+        "public" => {
+             crate::paseto::verify_v4_public(token, &key_bytes, implicit_assertion)
+                .map_err(PyErr::from)?
+        },
+        _ => return Err(PyValueError::new_err("Purpose must be 'local' or 'public'"))
+    };
+
+    // 3. Deserialize Payload (JSON Bytes -> Rust Serde Value -> Python Object)
+    let val: Value = from_slice(&payload_bytes).map_err(|e| PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+    let py_obj = pythonize(py, &val).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // pythonize returns Bound<'py, PyAny>, so just return it directly
+    Ok(py_obj)
+}
+
+
+#[pyfunction]
+#[pyo3(signature = (payload, key, footer=None, implicit_assertion=None))]
+fn paseto_sign(payload: &[u8], key: &[u8], footer: Option<&[u8]>, implicit_assertion: Option<&[u8]>) -> PyResult<String> {
+    // This calls the previously unused sign_v4_public
+    crate::paseto::sign_v4_public(payload, key, footer, implicit_assertion).map_err(PyErr::from)
+}
+
+#[pyfunction]
+fn paseto_verify<'py>(py: Python<'py>, token: &str, key: &[u8], implicit_assertion: Option<&[u8]>) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+    // This calls the previously unused verify_v4_public
+    let (payload, footer) = crate::paseto::verify_v4_public(token, key, implicit_assertion).map_err(PyErr::from)?;
+    Ok((PyBytes::new(py, &payload), PyBytes::new(py, &footer)))
+}
+
+
+// -- Module registration
+
 // Register a submodule and add it to sys.modules 
-fn add_submodule_with_sys(
-    py: Python, 
-    parent: &Bound<'_, PyModule>, 
-    name: &str, 
+fn add_submodule_with_sys(py: Python, parent: &Bound<'_, PyModule>, name: &str, 
     setup_fn: impl FnOnce(Python, &Bound<'_, PyModule>) -> PyResult<()>
 ) -> PyResult<()> {
+        
     let submod = PyModule::new(py, name)?;
     setup_fn(py, &submod)?;
     parent.add_submodule(&submod)?;
 
-    // Add to sys.modules (allows `from toke.jwk import ...`)
+    // Add to sys.modules - allows from webtoken.jwk import 
     let parent_name = parent.name()?;
     let full_name = format!("{}.{}", parent_name, name);
     py.import("sys")?.getattr("modules")?.set_item(full_name, &submod)?;
@@ -1240,6 +985,12 @@ fn _webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(encrypt, m)?)?;
     m.add_function(wrap_pyfunction!(decrypt, m)?)?;
+    m.add_function(wrap_pyfunction!(encrypt_compact, m)?)?;
+    m.add_function(wrap_pyfunction!(decrypt_compact, m)?)?;
+    m.add_function(wrap_pyfunction!(paseto_encode, m)?)?;  
+    m.add_function(wrap_pyfunction!(paseto_decode, m)?)?;
+    m.add_function(wrap_pyfunction!(paseto_sign, m)?)?;
+    m.add_function(wrap_pyfunction!(paseto_verify, m)?)?;
 
     m.add_function(wrap_pyfunction!(load_jwk, m)?)?;
     m.add_function(wrap_pyfunction!(load_jwk_set, m)?)?; 

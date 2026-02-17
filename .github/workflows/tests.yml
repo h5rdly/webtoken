@@ -36,7 +36,6 @@ jobs:
         shell: bash
         run: |
           maturin build --release
-          # Universal install command that works on Bash (Linux/Mac) and Git Bash (Windows)
           pip install target/wheels/*.whl
 
       - name: Run tests

@@ -42,7 +42,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-      
       - name: Set up QEMU
         if: matrix.qemu
         uses: docker/setup-qemu-action@v3
@@ -61,6 +60,30 @@ jobs:
           name: wheels-${{ matrix.name }}
           path: dist
 
+  build_wheels_freebsd:
+    name: Build FreeBSD wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y rust python313 git
+          
+          run: |
+            python3.13 -m venv venv
+            . venv/bin/activate
+            pip install maturin
+            maturin build --release --out dist --find-interpreter
+            
+      - name: Upload FreeBSD wheels
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheels-freebsd
+          path: dist
+
+
   build_sdist:
     name: Build source distribution
     runs-on: ubuntu-latest
@@ -74,16 +97,16 @@ jobs:
       - name: Upload sdist
         uses: actions/upload-artifact@v6
         with:
-          name: wheels-sdist
+          name: sdist
           path: dist
 
   publish:
     name: PyPI
-    needs: [build_wheels, build_sdist]
+    needs: [build_wheels, build_wheels_freebsd, build_sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      contents: read
+      contents: write
       id-token: write
     
     steps:
@@ -95,3 +118,11 @@ jobs:
       
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/*
+
+          

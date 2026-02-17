@@ -1,6 +1,6 @@
 use serde_json::{Value, Map};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use crate::{WebtokenError, algorithms, py_utils::decode_base64_permissive};
+use crate::{WebtokenError, crypto, py_utils::decode_base64_permissive};
 
 
 pub fn prepare_jws_parts(header_map: &Map<String, Value>, payload_bytes: &[u8]
@@ -27,8 +27,7 @@ pub fn sign_output(
         return Ok(format!("{}.{}.", header_b64, payload_b64));
     }
 
-    let sig_bytes = algorithms::perform_signature(signing_input.as_bytes(), key, alg_name)?;
-    let sig_b64 = URL_SAFE_NO_PAD.encode(sig_bytes);
+    let sig_bytes = crypto::sign(alg_name, key, signing_input.as_bytes())?;    let sig_b64 = URL_SAFE_NO_PAD.encode(sig_bytes);
 
     if detached {
         Ok(format!("{}..{}", header_b64, sig_b64))
@@ -49,10 +48,7 @@ pub fn verify_bytes(token: &str, key: &[u8], alg_name: &str) -> Result<(Value, V
     let sig_bytes = decode_base64_permissive(signature_b64.as_bytes())
         .map_err(|_| WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid crypto padding".into() })?;
 
-    let valid = algorithms::perform_verification(signing_input.as_bytes(), &sig_bytes, key, alg_name)?;
-    if !valid { 
-        return Err(WebtokenError::Custom { exc: "InvalidSignatureError".into(), msg: "Signature verification failed".into() });
-    }
+    crypto::verify(alg_name, key, signing_input.as_bytes(), &sig_bytes)?;
 
     let header_bytes = decode_base64_permissive(header_b64.as_bytes())
         .map_err(|_| WebtokenError::Custom { exc: "DecodeError".into(), msg: "Invalid header padding".into() })?;

@@ -1,10 +1,9 @@
 use serde_json::{Value, json};
 use base64::{engine::general_purpose::{URL_SAFE_NO_PAD, STANDARD}, Engine as _};
 use num_bigint::BigUint;
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 
 use crate::{WebtokenError};
-use crate::crypto::{recover_primes, compute_crt};
+use crate::crypto::{recover_primes, compute_crt, ed25519_public_from_seed};
 
 
 const OID_EC_PUBLIC_KEY: &[u8] = &[0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
@@ -335,9 +334,8 @@ fn parse_okp_private(der: &[u8]) -> Result<Value, String> {
 
     // Derive public key 'x' from private seed 'd' for Ed25519, so that the JWK is complete
     if crv == "Ed25519" {
-         if let Ok(kp) = Ed25519KeyPair::from_seed_unchecked(d) {
-             let x = kp.public_key().as_ref();
-             j["x"] = json!(b64(x));
+        if let Ok(x) = ed25519_public_from_seed(d) {
+             j["x"] = json!(b64(&x));
          }
     }
 
@@ -568,7 +566,6 @@ pub fn extract_key_bytes(jwk: &Value, public_only: bool) -> Result<Vec<u8>, Stri
              Err("Missing parameters for EC".to_string())
         },
         "RSA" => {
-             // [FIX] Implemented RSA DER Encoding
              let n = get_biguint(jwk, "n").map_err(|e| e.to_string())?;
              let e = get_biguint(jwk, "e").map_err(|e| e.to_string())?;
 
@@ -641,3 +638,4 @@ pub fn extract_key_bytes(jwk: &Value, public_only: bool) -> Result<Vec<u8>, Stri
         _ => Err(format!("Unsupported key type for raw extraction: {}", kty))
     }
 }
+
