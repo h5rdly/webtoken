@@ -59,7 +59,7 @@ print(decoded)
 
 - The rust based encode/decode release the GIL
 
-- You can send them away on asyncio.to_thread(), or use the provided wrappers
+- Send them away on asyncio.to_thread(), or use the provided wrappers
 
 ```python
 import webtoken as wt
