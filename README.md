@@ -100,21 +100,6 @@ Effort is made to make toke as compatible as possible with [PyJWT](https://githu
 
 ##  Crypto
 
-The crypto backend used by webtoken is [aws-lc-rs](https://github.com/aws/aws-lc-rs).
+The crypto backend is mostly based on [aws-lc-rs](https://github.com/aws/aws-lc-rs).
 
-
-### Supported algorithms
-
-PyJWT compat - 
-- HS256
-- HS384
-- HS512
-- RS256
-- RS384
-- RS512
-- ES512
-
-As well as - 
-- ES256K
-- ML-DSA-65
-
+XChaCha20 support, for PASETO v4 and JWE, comes via [Graviola](https://github.com/ctz/graviola).
