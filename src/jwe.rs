@@ -67,20 +67,12 @@ fn manage_cek_encrypt(alg: &str, enc: &str, key: &[u8], headers: &mut Value) -> 
         },
         // PBES2-HS256+A128KW, etc.
         alg if alg.starts_with("PBES2-") => {
-            // 1. Parse params
-            let (salt_input, iterations, kek_len) = prepare_pbes2_params(alg, headers)?;
-
-            // 2. Derive KEK via PBKDF2
-            // PBKDF2(password, salt, iter, key_len)
-            // Note: In crypto.rs we need a pbkdf2 function. We have pbkdf2_hmac_sha256 bindings.
-            // Assuming we export a generic one or use the specific one based on alg hash.
-            // For simplicity here, assuming SHA256 for PBES2-HS256.
+            let (p2s, p2c, kek_len) = prepare_pbes2_params_encrypt(alg, headers)?;
+            let kek = derive_pbes2_kek(alg, key, &p2s, p2c, kek_len)?;
             
-            // NOTE: This requires `crypto::pbkdf2` to be implemented/exposed properly. 
-            // Since `crypto.rs` currently only has `pbkdf2_manual_sha256` which is private/manual,
-            // we will need to add a proper `pbkdf2_derive` to `crypto.rs` to support this fully.
-            // I will return an error here until crypto.rs is updated for PBKDF2 public access.
-             Err(WebtokenError::UnsupportedAlgorithm(format!("PBES2 not fully linked: {}", alg).into()))
+            let cek = crypto::get_random_bytes(cek_len)?;
+            let encrypted_cek = crypto::aes_key_wrap(&kek, &cek)?;
+            Ok((cek, encrypted_cek))
         },
         _ => Err(WebtokenError::UnsupportedAlgorithm(format!("Unknown alg: {}", alg).into()))
     }
@@ -102,6 +94,12 @@ fn manage_cek_decrypt(alg: &str, enc: &str, key: &[u8], encrypted_key: &[u8], he
         },
         "A128KW" | "A192KW" | "A256KW" => {
              crypto::aes_key_unwrap(key, encrypted_key)
+        },
+        alg if alg.starts_with("PBES2-") => {
+            let (p2s, p2c, kek_len) = prepare_pbes2_params_decrypt(alg, headers)?;
+            let kek = derive_pbes2_kek(alg, key, &p2s, p2c, kek_len)?;
+            
+            crypto::aes_key_unwrap(&kek, encrypted_key)
         },
         "ECDH-ES" | "ECDH-ES+A128KW" | "ECDH-ES+A192KW" | "ECDH-ES+A256KW" => {
             let epk = headers.get("epk").ok_or_else(|| WebtokenError::InvalidToken("Missing epk".into()))?;
@@ -317,9 +315,61 @@ fn get_key_wrap_length(alg: &str) -> Result<usize, WebtokenError> {
     }
 }
 
-// Placeholder for PBES2 params parsing
-fn prepare_pbes2_params(_alg: &str, _headers: &mut Value) -> Result<(Vec<u8>, u32, usize), WebtokenError> {
-    // Logic to parse/generate 'p2s', 'p2c' would go here
-    // For now returning error to satisfy the compiler while keeping the structure for future implementation
-    Err(WebtokenError::UnsupportedAlgorithm(format!("PBES2 not fully implemented")))
+
+fn prepare_pbes2_params_encrypt(alg: &str, headers: &mut Value) -> Result<(Vec<u8>, u32, usize), WebtokenError> {
+    let (kek_len, default_p2c) = match alg {
+        "PBES2-HS256+A128KW" => (16, 8192), // 8192 is a common default for JWT iterations
+        "PBES2-HS384+A192KW" => (24, 8192),
+        "PBES2-HS512+A256KW" => (32, 8192),
+        _ => return Err(WebtokenError::UnsupportedAlgorithm(format!("Unsupported PBES2 alg: {}", alg))),
+    };
+
+    // Generate 16 bytes of random salt for p2s
+    let p2s = crypto::get_random_bytes(16)?;
+    let p2c = default_p2c;
+
+    if let Some(obj) = headers.as_object_mut() {
+        obj.insert("p2s".to_string(), Value::String(URL_SAFE_NO_PAD.encode(&p2s)));
+        obj.insert("p2c".to_string(), Value::Number(p2c.into()));
+    }
+
+    Ok((p2s, p2c, kek_len))
 }
+
+fn prepare_pbes2_params_decrypt(alg: &str, headers: &Value) -> Result<(Vec<u8>, u32, usize), WebtokenError> {
+    let kek_len = match alg {
+        "PBES2-HS256+A128KW" => 16,
+        "PBES2-HS384+A192KW" => 24,
+        "PBES2-HS512+A256KW" => 32,
+        _ => return Err(WebtokenError::UnsupportedAlgorithm(format!("Unsupported PBES2 alg: {}", alg))),
+    };
+
+    let p2s_b64 = headers.get("p2s").and_then(|v| v.as_str())
+        .ok_or_else(|| WebtokenError::InvalidToken("Missing p2s parameter".into()))?;
+    let p2s = decode_base64_permissive(p2s_b64.as_bytes())
+        .map_err(|_| WebtokenError::InvalidToken("Invalid p2s encoding".into()))?;
+
+    let p2c = headers.get("p2c").and_then(|v| v.as_u64())
+        .ok_or_else(|| WebtokenError::InvalidToken("Missing p2c parameter".into()))? as u32;
+
+    Ok((p2s, p2c, kek_len))
+}
+
+fn derive_pbes2_kek(alg: &str, password: &[u8], p2s: &[u8], p2c: u32, kek_len: usize) -> Result<Vec<u8>, WebtokenError> {
+    // JWE Spec formats the PBKDF2 salt as: UTF8(alg) || 0x00 || p2s
+    let mut salt = Vec::with_capacity(alg.len() + 1 + p2s.len());
+    salt.extend_from_slice(alg.as_bytes());
+    salt.push(0x00);
+    salt.extend_from_slice(p2s);
+
+    let mut kek = vec![0u8; kek_len];
+    match alg {
+        "PBES2-HS256+A128KW" => crypto::pbkdf2_manual_sha256(password, &salt, p2c, &mut kek),
+        "PBES2-HS384+A192KW" => crypto::pbkdf2_manual_sha384(password, &salt, p2c, &mut kek),
+        "PBES2-HS512+A256KW" => crypto::pbkdf2_manual_sha512(password, &salt, p2c, &mut kek),
+        _ => return Err(WebtokenError::UnsupportedAlgorithm(format!("Unsupported PBES2 alg: {}", alg))),
+    }
+    
+    Ok(kek)
+}
+

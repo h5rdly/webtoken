@@ -54,7 +54,7 @@ pub fn verify_bytes(token: &str, key: &[u8], alg_name: &str) -> Result<(Value, V
         .map_err(|_| WebtokenError::DecodeError("Invalid header padding".into()))?;
     
     let header: Value = serde_json::from_slice(&header_bytes)
-        .map_err(|e| WebtokenError::DecodeError("Invalid header string".into()))?;
+        .map_err(|_| WebtokenError::DecodeError("Invalid header string".into()))?;
     
     let payload_bytes = decode_base64_permissive(payload_b64.as_bytes())
         .map_err(|_| WebtokenError::DecodeError("Invalid payload padding".into()))?;

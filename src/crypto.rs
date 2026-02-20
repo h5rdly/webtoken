@@ -49,8 +49,8 @@ use aws_lc_rs::signature::{
 };
 use aws_lc_rs::encoding::AsDer;
 
-use blake2::Blake2bVar; 
-use blake2::digest::{Update, VariableOutput};
+use blake2b_simd::Params as Blake2bParams;
+use chacha20::{XChaCha20, cipher::{KeyIvInit, StreamCipher}};
 
 use num_bigint::{BigInt, BigUint, Sign};
 use num_integer::Integer;
@@ -89,7 +89,7 @@ fn decode_key_bytes(data: &[u8]) -> Vec<u8> {
 }
 
 // Helper to extract raw 32-byte key from various formats (Raw, SPKI, PKCS#8)
-fn extract_x25519_bytes(data: &[u8]) -> Result<Vec<u8>, WebtokenError> {
+pub fn extract_x25519_bytes(data: &[u8]) -> Result<Vec<u8>, WebtokenError> {
     let bytes = decode_key_bytes(data);
     match bytes.len() {
         32 => Ok(bytes),
@@ -619,7 +619,8 @@ pub fn concat_kdf_sha256(shared_secret: &[u8], key_len_bits: u32, alg_id: &[u8],
     out
 }
 
-fn pbkdf2_manual_sha256(password: &[u8], salt: &[u8], iterations: u32, out: &mut [u8]) {
+
+pub fn pbkdf2_manual_sha256(password: &[u8], salt: &[u8], iterations: u32, out: &mut [u8]) {
     let block_size = 32;
     for (i, chunk) in out.chunks_mut(block_size).enumerate() {
         let mut h = Hmac::<Sha256>::new(password);
@@ -638,6 +639,47 @@ fn pbkdf2_manual_sha256(password: &[u8], salt: &[u8], iterations: u32, out: &mut
         chunk.copy_from_slice(&block[..chunk.len()]);
     }
 }
+
+pub fn pbkdf2_manual_sha384(password: &[u8], salt: &[u8], iterations: u32, out: &mut [u8]) {
+    let block_size = 48;
+    for (i, chunk) in out.chunks_mut(block_size).enumerate() {
+        let mut h = Hmac::<Sha384>::new(password);
+        h.update(salt); h.update(&((i as u32 + 1).to_be_bytes()));
+        let u1 = h.finish();
+        let mut block = [0u8; 48];
+        block.copy_from_slice(u1.as_ref());
+        let mut u_prev = u1;
+        for _ in 1..iterations {
+            let mut h = Hmac::<Sha384>::new(password);
+            h.update(u_prev.as_ref());
+            let u_next = h.finish();
+            for (b, x) in block.iter_mut().zip(u_next.as_ref().iter()) { *b ^= *x; }
+            u_prev = u_next;
+        }
+        chunk.copy_from_slice(&block[..chunk.len()]);
+    }
+}
+
+pub fn pbkdf2_manual_sha512(password: &[u8], salt: &[u8], iterations: u32, out: &mut [u8]) {
+    let block_size = 64;
+    for (i, chunk) in out.chunks_mut(block_size).enumerate() {
+        let mut h = Hmac::<Sha512>::new(password);
+        h.update(salt); h.update(&((i as u32 + 1).to_be_bytes()));
+        let u1 = h.finish();
+        let mut block = [0u8; 64];
+        block.copy_from_slice(u1.as_ref());
+        let mut u_prev = u1;
+        for _ in 1..iterations {
+            let mut h = Hmac::<Sha512>::new(password);
+            h.update(u_prev.as_ref());
+            let u_next = h.finish();
+            for (b, x) in block.iter_mut().zip(u_next.as_ref().iter()) { *b ^= *x; }
+            u_prev = u_next;
+        }
+        chunk.copy_from_slice(&block[..chunk.len()]);
+    }
+}
+
 
 // ============================================================================
 //  Sign/Verify (JWS)
@@ -757,10 +799,9 @@ pub fn paseto_v4_encrypt(
     payload: &[u8], 
     footer: &[u8], 
     implicit: &[u8],
-    nonce_opt: Option<&[u8]> // New argument
+    nonce_opt: Option<&[u8]>
 ) -> Result<Vec<u8>, WebtokenError> {
     
-    // 1. Generate or use provided nonce (32 bytes for PASETO v4)
     let nonce_vec = if let Some(n) = nonce_opt {
         if n.len() != 32 { return Err(WebtokenError::InvalidToken("PASETO v4 Nonce must be 32 bytes".into())); }
         n.to_vec()
@@ -769,42 +810,50 @@ pub fn paseto_v4_encrypt(
     };
     let nonce: &[u8; 32] = nonce_vec.as_slice().try_into().unwrap();
 
-    // ... [Rest of logic remains identical] ...
-    let mut kdf_enc = Blake2bVar::new(56).map_err(|_| WebtokenError::Generic("KDF".into()))?;
-    Update::update(&mut kdf_enc, key);
-    Update::update(&mut kdf_enc, b"paseto-encryption-key");
-    Update::update(&mut kdf_enc, nonce);
-    let mut tmp = [0u8; 56];
-    kdf_enc.finalize_variable(&mut tmp).map_err(|_| WebtokenError::Generic("KDF".into()))?;
+    // 1. KDF for Encryption Key (ek) and Nonce (n2) - 56 bytes
+    let tmp = Blake2bParams::new()
+        .hash_length(56)
+        .key(key)
+        .to_state()
+        .update(b"paseto-encryption-key")
+        .update(nonce)
+        .finalize();
     
-    let ek: [u8; 32] = tmp[0..32].try_into().unwrap();
-    let n2: [u8; 24] = tmp[32..56].try_into().unwrap();
+    let tmp_bytes = tmp.as_bytes();
+    let ek: [u8; 32] = tmp_bytes[0..32].try_into().unwrap();
+    let n2: [u8; 24] = tmp_bytes[32..56].try_into().unwrap();
 
-    let mut kdf_auth = Blake2bVar::new(32).map_err(|_| WebtokenError::Generic("KDF".into()))?;
-    Update::update(&mut kdf_auth, key);
-    Update::update(&mut kdf_auth, b"paseto-auth-key-for-aead");
-    Update::update(&mut kdf_auth, nonce);
-    let mut ak = [0u8; 32];
-    kdf_auth.finalize_variable(&mut ak).map_err(|_| WebtokenError::Generic("KDF".into()))?;
+    // 2. KDF for Authentication Key (ak) - 32 bytes
+    let ak_hash = Blake2bParams::new()
+        .hash_length(32)
+        .key(key)
+        .to_state()
+        .update(b"paseto-auth-key-for-aead")
+        .update(nonce)
+        .finalize();
+    let ak: &[u8; 32] = ak_hash.as_bytes().try_into().unwrap();
 
-    let cipher = XChaCha20Poly1305::new(ek);
+    // 3. Encrypt payload using pure XChaCha20 stream cipher
     let mut ciphertext = payload.to_vec();
-    let mut dummy_tag = [0u8; 16];
-    cipher.encrypt(&n2, &[], &mut ciphertext, &mut dummy_tag);
+    let mut cipher = XChaCha20::new(&ek.into(), &n2.into());
+    cipher.apply_keystream(&mut ciphertext);
 
+    // 4. Calculate MAC over PAE
     let header = b"v4.local.";
     let pre_auth = pae(&[header, nonce, &ciphertext, footer, implicit]);
     
-    let mut mac = Blake2bVar::new(32).map_err(|_| WebtokenError::Generic("MAC".into()))?;
-    Update::update(&mut mac, &ak);
-    Update::update(&mut mac, &pre_auth);
-    let mut t = [0u8; 32];
-    mac.finalize_variable(&mut t).map_err(|_| WebtokenError::Generic("MAC".into()))?;
+    let t_hash = Blake2bParams::new()
+        .hash_length(32)
+        .key(ak)
+        .to_state()
+        .update(&pre_auth)
+        .finalize();
 
+    // 5. Assemble
     let mut output = Vec::with_capacity(32 + ciphertext.len() + 32);
     output.extend_from_slice(nonce);
     output.extend_from_slice(&ciphertext);
-    output.extend_from_slice(&t);
+    output.extend_from_slice(t_hash.as_bytes());
     Ok(output)
 }
 
@@ -818,41 +867,53 @@ pub fn paseto_v4_decrypt(
     let ciphertext = &body[32..t_len];
     let tag = &body[t_len..];
 
-    let mut kdf_enc = Blake2bVar::new(56).map_err(|_| WebtokenError::Generic("KDF".into()))?;
-    Update::update(&mut kdf_enc, key);
-    Update::update(&mut kdf_enc, b"paseto-encryption-key");
-    Update::update(&mut kdf_enc, nonce);
-    let mut tmp = [0u8; 56];
-    kdf_enc.finalize_variable(&mut tmp).map_err(|_| WebtokenError::Generic("KDF".into()))?;
+    // 1. KDF for Encryption Key (ek) and Nonce (n2)
+    let tmp = Blake2bParams::new()
+        .hash_length(56)
+        .key(key)
+        .to_state()
+        .update(b"paseto-encryption-key")
+        .update(nonce)
+        .finalize();
     
-    let ek: [u8; 32] = tmp[0..32].try_into().unwrap();
-    let n2: [u8; 24] = tmp[32..56].try_into().unwrap();
+    let tmp_bytes = tmp.as_bytes();
+    let ek: [u8; 32] = tmp_bytes[0..32].try_into().unwrap();
+    let n2: [u8; 24] = tmp_bytes[32..56].try_into().unwrap();
 
-    let mut kdf_auth = Blake2bVar::new(32).map_err(|_| WebtokenError::Generic("KDF".into()))?;
-    Update::update(&mut kdf_auth, key);
-    Update::update(&mut kdf_auth, b"paseto-auth-key-for-aead");
-    Update::update(&mut kdf_auth, nonce);
-    let mut ak = [0u8; 32];
-    kdf_auth.finalize_variable(&mut ak).map_err(|_| WebtokenError::Generic("KDF".into()))?;
+    // 2. KDF for Authentication Key (ak)
+    let ak_hash = Blake2bParams::new()
+        .hash_length(32)
+        .key(key)
+        .to_state()
+        .update(b"paseto-auth-key-for-aead")
+        .update(nonce)
+        .finalize();
+    let ak: &[u8; 32] = ak_hash.as_bytes().try_into().unwrap();
 
+    // 3. Verify MAC
     let header = b"v4.local.";
     let pre_auth = pae(&[header, nonce, ciphertext, footer, implicit]);
     
-    let mut mac = Blake2bVar::new(32).map_err(|_| WebtokenError::Generic("MAC".into()))?;
-    Update::update(&mut mac, &ak);
-    Update::update(&mut mac, &pre_auth);
-    let mut calc_t = [0u8; 32];
-    mac.finalize_variable(&mut calc_t).map_err(|_| WebtokenError::Generic("MAC".into()))?;
+    let calc_t = Blake2bParams::new()
+        .hash_length(32)
+        .key(ak)
+        .to_state()
+        .update(&pre_auth)
+        .finalize();
 
-    if tag != &calc_t[0..32] { return Err(WebtokenError::InvalidSignature); }
+    // Constant-time equality check (provided naturally by blake2b_simd::Hash)
+    if !calc_t.eq(tag) { 
+        return Err(WebtokenError::InvalidSignature); 
+    }
 
-    let cipher = XChaCha20Poly1305::new(ek);
+    // 4. Decrypt payload using pure XChaCha20 stream cipher
     let mut plaintext = ciphertext.to_vec();
-    let mut dummy_tag = [0u8; 16];
-    cipher.encrypt(&n2, &[], &mut plaintext, &mut dummy_tag); 
+    let mut cipher = XChaCha20::new(&ek.into(), &n2.into());
+    cipher.apply_keystream(&mut plaintext); 
 
     Ok(plaintext)
 }
+
 
 // ... (Python Bindings) ...
 #[pyfunction]
@@ -945,23 +1006,186 @@ pub fn generate_key_pair(algorithm: &str, key_size: Option<usize>) -> PyResult<(
     }
 }
 
-#[pyfunction] #[pyo3(signature = (alg, key, message))] fn sign_py(alg: &str, key: &[u8], message: &[u8]) -> PyResult<Py<PyBytes>> { let sig = sign(alg, key, message).map_err(|e| PyValueError::new_err(format!("Sign failed: {:?}", e)))?; Python::attach(|py| Ok(PyBytes::new(py, &sig).into())) }
-#[pyfunction] #[pyo3(signature = (alg, key, message, signature))] fn verify_py(alg: &str, key: &[u8], message: &[u8], signature: &[u8]) -> PyResult<()> { verify(alg, key, message, signature).map_err(|e| PyValueError::new_err(format!("Verify failed: {:?}", e))) }
-#[pyfunction] fn digest(algorithm: &str, data: &[u8]) -> PyResult<Vec<u8>> { match algorithm.to_uppercase().as_str() { "SHA256"|"HS256"|"RS256"|"ES256"|"PS256"|"ES256K" => Ok(Sha256::hash(data).as_ref().to_vec()), "SHA384"|"HS384"|"RS384"|"ES384"|"PS384" => Ok(Sha384::hash(data).as_ref().to_vec()), "SHA512"|"HS512"|"RS512"|"ES512"|"PS512" => Ok(Sha512::hash(data).as_ref().to_vec()), _ => Err(PyValueError::new_err("Unsupported hash algorithm")), } }
-#[pyfunction] #[pyo3(signature = (data, password=None))] fn load_pem_private_key(py: Python, data: &[u8], password: Option<&[u8]>) -> PyResult<Py<PyBytes>> { if password.is_some() { return Err(PyValueError::new_err("Encrypted keys not supported in test utils")); } let s = std::str::from_utf8(data).map_err(|_| PyValueError::new_err("Invalid UTF-8 in PEM"))?; if !s.trim().starts_with("-----BEGIN") { return Err(PyValueError::new_err("Invalid PEM format")); } Ok(PyBytes::new(py, data).into()) }
-#[pyfunction] fn load_pem_public_key(py: Python, data: &[u8]) -> PyResult<Py<PyBytes>> { let s = std::str::from_utf8(data).map_err(|_| PyValueError::new_err("Invalid UTF-8 in PEM"))?; if !s.trim().starts_with("-----BEGIN") { return Err(PyValueError::new_err("Invalid PEM format")); } Ok(PyBytes::new(py, data).into()) }
-#[pyfunction] fn load_ssh_public_key(py: Python, data: &[u8]) -> PyResult<Py<PyBytes>> { let pem = ssh_to_pem(data).map_err(PyValueError::new_err)?; Ok(PyBytes::new(py, &pem).into()) }
-#[pyfunction] fn random_bytes<'py>(py: Python<'py>, length: usize) -> PyResult<Bound<'py, PyBytes>> { let out = get_random_bytes(length).map_err(PyErr::from)?; Ok(PyBytes::new(py, &out)) }
-#[pyfunction] pub fn generate_pkce_pair() -> PyResult<(String, String)> { let mut rand_bytes = [0u8; 32]; aws_lc_rs::rand::fill(&mut rand_bytes).map_err(|_| PyValueError::new_err("RNG failed"))?; let verifier = URL_SAFE_NO_PAD.encode(rand_bytes); let hash = Sha256::hash(verifier.as_bytes()); let challenge = URL_SAFE_NO_PAD.encode(hash.as_ref()); Ok((verifier, challenge)) }
-#[pyfunction] #[pyo3(signature = (password, salt, iterations, length=32))] fn pbkdf2_hmac_sha256<'py>(py: Python<'py>, password: &[u8], salt: &[u8], iterations: u32, length: usize) -> PyResult<Bound<'py, PyBytes>> { let mut out = vec![0u8; length]; pbkdf2_manual_sha256(password, salt, iterations, &mut out); Ok(PyBytes::new(py, &out)) }
-#[pyfunction] #[pyo3(signature = (secret, salt, info, length=32))] fn hkdf_sha256_py<'py>(py: Python<'py>, secret: &[u8], salt: &[u8], info: &[u8], length: usize) -> PyResult<Bound<'py, PyBytes>> { let out = hkdf_sha256(secret, salt, info, length); Ok(PyBytes::new(py, &out)) }
 
-#[pyfunction] #[pyo3(signature = (key, plaintext, aad=None))] fn encrypt_aes_256_gcm<'py>(py: Python<'py>, key: &[u8], plaintext: &[u8], aad: Option<&[u8]>) -> PyResult<Bound<'py, PyBytes>> { if key.len() != 32 { return Err(PyValueError::new_err("AES-256-GCM key must be 32 bytes")); } let (buffer, tag, nonce) = aes_gcm_encrypt(key, None, plaintext, aad.unwrap_or(&[])).map_err(|e| PyValueError::new_err(format!("{:?}", e)))?; let mut out_buffer = Vec::with_capacity(nonce.len() + buffer.len() + tag.len()); out_buffer.extend_from_slice(&nonce); out_buffer.extend_from_slice(&buffer); out_buffer.extend_from_slice(&tag); Ok(PyBytes::new(py, &out_buffer)) }
+#[pyfunction]
+#[pyo3(signature = (alg, key, message))]
+fn sign_py<'py>(
+    py: Python<'py>,
+    alg: &str,
+    key: &[u8],
+    message: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    let sig = sign(alg, key, message)
+        .map_err(|e| PyValueError::new_err(format!("Sign failed: {:?}", e)))?;
+    Ok(PyBytes::new(py, &sig))
+}
 
-#[pyfunction] #[pyo3(signature = (key, ciphertext, aad=None))] fn decrypt_aes_256_gcm<'py>(py: Python<'py>, key: &[u8], ciphertext: &[u8], aad: Option<&[u8]>) -> PyResult<Bound<'py, PyBytes>> { if key.len() != 32 { return Err(PyValueError::new_err("AES-256-GCM key must be 32 bytes")); } if ciphertext.len() < 28 { return Err(PyValueError::new_err("Ciphertext too short")); } let (nonce, rest) = ciphertext.split_at(12); let (encrypted_data, tag) = rest.split_at(rest.len() - 16); let plaintext = aes_gcm_decrypt(key, nonce, encrypted_data, tag, aad.unwrap_or(&[])).map_err(|_| PyValueError::new_err("Decryption failed"))?; Ok(PyBytes::new(py, &plaintext)) }
-#[pyfunction] pub fn ed25519_public_from_seed_py(seed: &[u8]) -> PyResult<Vec<u8>> { ed25519_public_from_seed(seed).map_err(PyErr::from) }
-#[pyfunction] pub fn x25519_public_from_private_py(private_key: &[u8]) -> PyResult<Vec<u8>> { x25519_public_from_private(private_key).map_err(PyErr::from) }
-#[pyfunction] pub fn x25519_derive_py(private_key: &[u8], peer_public_key: &[u8]) -> PyResult<Vec<u8>> { x25519_derive(private_key, peer_public_key).map_err(PyErr::from) }
+#[pyfunction]
+#[pyo3(signature = (alg, key, message, signature))]
+fn verify_py(alg: &str, key: &[u8], message: &[u8], signature: &[u8]) -> PyResult<()> {
+    verify(alg, key, message, signature)
+        .map_err(|e| PyValueError::new_err(format!("Verify failed: {:?}", e)))
+}
+
+#[pyfunction]
+fn digest(algorithm: &str, data: &[u8]) -> PyResult<Vec<u8>> {
+    match algorithm.to_uppercase().as_str() {
+        "SHA256" | "HS256" | "RS256" | "ES256" | "PS256" | "ES256K" => {
+            Ok(Sha256::hash(data).as_ref().to_vec())
+        }
+        "SHA384" | "HS384" | "RS384" | "ES384" | "PS384" => {
+            Ok(Sha384::hash(data).as_ref().to_vec())
+        }
+        "SHA512" | "HS512" | "RS512" | "ES512" | "PS512" => {
+            Ok(Sha512::hash(data).as_ref().to_vec())
+        }
+        _ => Err(PyValueError::new_err("Unsupported hash algorithm")),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, password=None))]
+fn load_pem_private_key<'py>(
+    py: Python<'py>,
+    data: &[u8],
+    password: Option<&[u8]>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    if password.is_some() {
+        return Err(PyValueError::new_err(
+            "Encrypted keys not supported in test utils",
+        ));
+    }
+    let s = std::str::from_utf8(data)
+        .map_err(|_| PyValueError::new_err("Invalid UTF-8 in PEM"))?;
+    if !s.trim().starts_with("-----BEGIN") {
+        return Err(PyValueError::new_err("Invalid PEM format"));
+    }
+    Ok(PyBytes::new(py, data))
+}
+
+#[pyfunction]
+fn load_pem_public_key<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    let s = std::str::from_utf8(data)
+        .map_err(|_| PyValueError::new_err("Invalid UTF-8 in PEM"))?;
+    if !s.trim().starts_with("-----BEGIN") {
+        return Err(PyValueError::new_err("Invalid PEM format"));
+    }
+    Ok(PyBytes::new(py, data))
+}
+
+#[pyfunction]
+fn load_ssh_public_key<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    let pem = ssh_to_pem(data).map_err(PyValueError::new_err)?;
+    Ok(PyBytes::new(py, &pem))
+}
+
+#[pyfunction]
+fn random_bytes<'py>(py: Python<'py>, length: usize) -> PyResult<Bound<'py, PyBytes>> {
+    let out = get_random_bytes(length).map_err(PyErr::from)?;
+    Ok(PyBytes::new(py, &out))
+}
+
+#[pyfunction]
+pub fn generate_pkce_pair() -> PyResult<(String, String)> {
+    let mut rand_bytes = [0u8; 32];
+    aws_lc_rs::rand::fill(&mut rand_bytes).map_err(|_| PyValueError::new_err("RNG failed"))?;
+    
+    let verifier = URL_SAFE_NO_PAD.encode(rand_bytes);
+    let hash = Sha256::hash(verifier.as_bytes());
+    let challenge = URL_SAFE_NO_PAD.encode(hash.as_ref());
+    
+    Ok((verifier, challenge))
+}
+
+#[pyfunction]
+#[pyo3(signature = (password, salt, iterations, length=32))]
+fn pbkdf2_hmac_sha256<'py>(
+    py: Python<'py>,
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    length: usize,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let mut out = vec![0u8; length];
+    pbkdf2_manual_sha256(password, salt, iterations, &mut out);
+    Ok(PyBytes::new(py, &out))
+}
+
+#[pyfunction]
+#[pyo3(signature = (secret, salt, info, length=32))]
+fn hkdf_sha256_py<'py>(
+    py: Python<'py>,
+    secret: &[u8],
+    salt: &[u8],
+    info: &[u8],
+    length: usize,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let out = hkdf_sha256(secret, salt, info, length);
+    Ok(PyBytes::new(py, &out))
+}
+
+#[pyfunction]
+#[pyo3(signature = (key, plaintext, aad=None))]
+fn encrypt_aes_256_gcm<'py>(
+    py: Python<'py>,
+    key: &[u8],
+    plaintext: &[u8],
+    aad: Option<&[u8]>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    if key.len() != 32 {
+        return Err(PyValueError::new_err("AES-256-GCM key must be 32 bytes"));
+    }
+    
+    let (buffer, tag, nonce) = aes_gcm_encrypt(key, None, plaintext, aad.unwrap_or(&[]))
+        .map_err(|e| PyValueError::new_err(format!("{:?}", e)))?;
+        
+    let mut out_buffer = Vec::with_capacity(nonce.len() + buffer.len() + tag.len());
+    out_buffer.extend_from_slice(&nonce);
+    out_buffer.extend_from_slice(&buffer);
+    out_buffer.extend_from_slice(&tag);
+    
+    Ok(PyBytes::new(py, &out_buffer))
+}
+
+#[pyfunction]
+#[pyo3(signature = (key, ciphertext, aad=None))]
+fn decrypt_aes_256_gcm<'py>(
+    py: Python<'py>,
+    key: &[u8],
+    ciphertext: &[u8],
+    aad: Option<&[u8]>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    if key.len() != 32 {
+        return Err(PyValueError::new_err("AES-256-GCM key must be 32 bytes"));
+    }
+    if ciphertext.len() < 28 {
+        return Err(PyValueError::new_err("Ciphertext too short"));
+    }
+    
+    let (nonce, rest) = ciphertext.split_at(12);
+    let (encrypted_data, tag) = rest.split_at(rest.len() - 16);
+    
+    let plaintext = aes_gcm_decrypt(key, nonce, encrypted_data, tag, aad.unwrap_or(&[]))
+        .map_err(|_| PyValueError::new_err("Decryption failed"))?;
+        
+    Ok(PyBytes::new(py, &plaintext))
+}
+
+#[pyfunction]
+pub fn ed25519_public_from_seed_py(seed: &[u8]) -> PyResult<Vec<u8>> {
+    ed25519_public_from_seed(seed).map_err(PyErr::from)
+}
+
+#[pyfunction]
+pub fn x25519_public_from_private_py(private_key: &[u8]) -> PyResult<Vec<u8>> {
+    x25519_public_from_private(private_key).map_err(PyErr::from)
+}
+
+#[pyfunction]
+pub fn x25519_derive_py(private_key: &[u8], peer_public_key: &[u8]) -> PyResult<Vec<u8>> {
+    x25519_derive(private_key, peer_public_key).map_err(PyErr::from)
+}
+
 
 pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(digest, m)?)?;

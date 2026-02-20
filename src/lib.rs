@@ -868,35 +868,23 @@ fn paseto_encode(
 
     match purpose {
         "local" => {
-            let key_arr: [u8; 32] = key_bytes.try_into().map_err(|_| PyValueError::new_err("Local key must be 32 bytes"))?;
-            
-            // [FIX] Explicitly map errors to PyValueError here
-            let token_bytes = crate::crypto::paseto_v4_encrypt(
-                &key_arr, 
+            // [FIX] Call paseto.rs (which handles PASERK strings) instead of crypto.rs directly
+            crate::paseto::encrypt_v4_local(
                 &payload_bytes, 
-                footer.unwrap_or(&[]), 
-                implicit_assertion.unwrap_or(&[]),
+                &key_bytes, 
+                footer, 
+                implicit_assertion, 
                 nonce
-            ).map_err(|e| PyValueError::new_err(format!("{}", e)))?;
-
-            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-            let body = URL_SAFE_NO_PAD.encode(&token_bytes);
-            
-            if let Some(f) = footer {
-                let footer_b64 = URL_SAFE_NO_PAD.encode(f);
-                Ok(format!("v4.local.{}.{}", body, footer_b64))
-            } else {
-                Ok(format!("v4.local.{}", body))
-            }
+            ).map_err(|e| PyValueError::new_err(format!("{}", e)))
         },
         "public" => {
-            // [FIX] Explicitly map errors to PyValueError here
             crate::paseto::sign_v4_public(&payload_bytes, &key_bytes, footer, implicit_assertion)
                 .map_err(|e| PyValueError::new_err(format!("{}", e)))
         },
         _ => Err(PyValueError::new_err("Purpose must be 'local' or 'public'"))
     }
 }
+
 
 #[pyfunction]
 #[pyo3(signature = (key, token, purpose="local", implicit_assertion=None))]
@@ -937,6 +925,7 @@ fn paseto_sign(payload: &[u8], key: &[u8], footer: Option<&[u8]>, implicit_asser
     crate::paseto::sign_v4_public(payload, key, footer, implicit_assertion).map_err(PyErr::from)
 }
 
+
 #[pyfunction]
 fn paseto_verify<'py>(py: Python<'py>, token: &str, key: &[u8], implicit_assertion: Option<&[u8]>) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
     // This calls the previously unused verify_v4_public
@@ -944,6 +933,114 @@ fn paseto_verify<'py>(py: Python<'py>, token: &str, key: &[u8], implicit_asserti
     Ok((PyBytes::new(py, &payload), PyBytes::new(py, &footer)))
 }
 
+
+#[pyfunction]
+fn paserk_id(key: BytesOrString, purpose: &str) -> PyResult<String> {
+    let key_bytes: Vec<u8> = key.into();
+    crate::paseto::calculate_paserk_id(&key_bytes, purpose).map_err(PyErr::from)
+}
+
+
+#[pyfunction]
+#[pyo3(signature = (key, purpose, wrapping_key=None, password=None, sealing_key=None, options=None))]
+fn paserk_wrap(
+    key: BytesOrString, 
+    purpose: &str,
+    wrapping_key: Option<BytesOrString>,
+    password: Option<BytesOrString>,
+    sealing_key: Option<BytesOrString>,
+    options: Option<&Bound<'_, PyDict>>
+) -> PyResult<String> {
+    let key_bytes: Vec<u8> = key.into();
+    
+    // 1. Password-Based Key Wrapping (PBKW)
+    if let Some(pw) = password {
+        let pw_bytes: Vec<u8> = pw.into();
+        let mut memlimit = 67108864; // Default 64 MiB
+        let mut opslimit = 2;        // Default 2 iterations
+        let parallelism = 1;         // Argon2 standard
+
+        if let Some(opts) = options {
+            if let Ok(Some(v)) = opts.get_item("memlimit") { memlimit = v.extract::<u64>()?; }
+            if let Ok(Some(v)) = opts.get_item("opslimit") { opslimit = v.extract::<u32>()?; }
+        }
+
+        return crate::paseto::paserk_wrap_pbkw(&pw_bytes, &key_bytes, purpose, memlimit, opslimit, parallelism)
+            .map_err(|e| PyValueError::new_err(format!("{}", e)));
+    }
+    
+    // 2. Platform-Independent Encryption (PIE)
+    if let Some(wk) = wrapping_key {
+        let wk_bytes: Vec<u8> = wk.into();
+        return crate::paseto::paserk_wrap_pie(&wk_bytes, &key_bytes, purpose)
+            .map_err(|e| PyValueError::new_err(format!("{}", e)));
+    }
+
+    // 3. Public Key Sealing (Seal)
+    if let Some(sk) = sealing_key {
+        let sk_bytes: Vec<u8> = sk.into();
+        let stripped_sk = crypto::extract_x25519_bytes(&sk_bytes).unwrap_or(sk_bytes.clone());
+        return crate::paseto::paserk_seal(&stripped_sk, &key_bytes)
+            .map_err(|e| PyValueError::new_err(format!("{}", e)));
+    }
+
+    // 4. Basic Serialization
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let b64_key = URL_SAFE_NO_PAD.encode(&key_bytes);
+    match purpose {
+        "local" => Ok(format!("k4.local.{}", b64_key)),
+        "public" => Ok(format!("k4.public.{}", b64_key)),
+        "secret" => Ok(format!("k4.secret.{}", b64_key)),
+        _ => Err(PyValueError::new_err("Invalid PASERK purpose")),
+    }
+}
+
+
+#[pyfunction]
+#[pyo3(signature = (paserk, wrapping_key=None, password=None, unsealing_key=None))]
+fn paserk_unwrap<'py>(
+    py: Python<'py>,
+    paserk: &str,
+    wrapping_key: Option<BytesOrString>,
+    password: Option<BytesOrString>,
+    unsealing_key: Option<BytesOrString>,
+) -> PyResult<Bound<'py, PyBytes>> {
+
+    // 1. Password-Based Key Unwrapping (PBKW)
+    if let Some(pw) = password {
+        let pw_bytes: Vec<u8> = pw.into();
+        let unwrapped = crate::paseto::paserk_unwrap_pbkw(&pw_bytes, paserk)
+            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+        return Ok(PyBytes::new(py, &unwrapped));
+    }
+
+    // 2. Platform-Independent Decryption (PIE)
+    if let Some(wk) = wrapping_key {
+        let wk_bytes: Vec<u8> = wk.into();
+        let unwrapped = crate::paseto::paserk_unwrap_pie(&wk_bytes, paserk)
+            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+        return Ok(PyBytes::new(py, &unwrapped));
+    }
+
+    // 3. Public Key Unsealing (Seal)
+    if let Some(uk) = unsealing_key {
+        let uk_bytes: Vec<u8> = uk.into();
+        let stripped_uk = crate::crypto::extract_x25519_bytes(&uk_bytes).unwrap_or(uk_bytes.clone());
+        let unwrapped = crate::paseto::paserk_unseal(&stripped_uk, paserk)
+            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+        return Ok(PyBytes::new(py, &unwrapped));
+    }
+
+    // 4. Basic Deserialization
+    let parts: Vec<&str> = paserk.split('.').collect();
+    if parts.len() < 3 || parts[0] != "k4" {
+        return Err(PyValueError::new_err("Invalid PASERK basic format"));
+    }
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let data = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| PyValueError::new_err("Invalid PASERK encoding"))?;
+    
+    Ok(PyBytes::new(py, &data))
+}
 
 // -- Module registration
 
@@ -1004,6 +1101,9 @@ fn _webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(paseto_decode, m)?)?;
     m.add_function(wrap_pyfunction!(paseto_sign, m)?)?;
     m.add_function(wrap_pyfunction!(paseto_verify, m)?)?;
+    m.add_function(wrap_pyfunction!(paserk_id, m)?)?;
+    m.add_function(wrap_pyfunction!(paserk_wrap, m)?)?;
+    m.add_function(wrap_pyfunction!(paserk_unwrap, m)?)?;
 
     m.add_function(wrap_pyfunction!(load_jwk, m)?)?;
     m.add_function(wrap_pyfunction!(load_jwk_set, m)?)?; 

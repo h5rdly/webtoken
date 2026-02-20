@@ -13,7 +13,8 @@ aws-lc-rs = { version = "=1.15.4", features = ["unstable"] }   # ML-DSA-65 is cu
 
 # Aux Crypto
 graviola = "0.3"
-blake2 = "0.10" 
+blake2b_simd = "1.0.2"
+chacha20 = "0.9"
 argon2 = "0.5"
 flate2 = "1.1"
 
