@@ -30,10 +30,10 @@ num-traits = "0.2"
 num-integer = "0.1"
 
 
-pythonize = "0.27"
+pythonize = "0.28"
 
 [dependencies.pyo3]
-version = "0.27" 
+version = "0.28" 
 features = ["extension-module", "abi3-py311", "py-clone", "time"] 
 
 

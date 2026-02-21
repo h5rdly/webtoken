@@ -4,6 +4,9 @@ use graviola::hashing::{Sha512, Hash};
 use blake2b_simd::Params as Blake2bParams; 
 use chacha20::{XChaCha20, cipher::{KeyIvInit, StreamCipher}};
 
+use pyo3::prelude::*;
+use pyo3::exceptions::PyValueError;
+
 use crate::{WebtokenError, crypto};
 
 // PAE helper needed for Public Signatures (Local uses the one in crypto.rs)
@@ -20,22 +23,49 @@ fn pae(pieces: &[&[u8]]) -> Vec<u8> {
 // --- PASERK Helpers ---
 
 fn decode_paserk_key(key: &[u8], expected_header: &str) -> Result<Vec<u8>, WebtokenError> {
-    if key.len() == 32 && !key.starts_with(b"k4.") { return Ok(key.to_vec()); }
-
     if let Ok(s) = std::str::from_utf8(key) {
-        if s.starts_with("k4.") {
-            let parts: Vec<&str> = s.split('.').collect();
-            if parts.len() < 3 || parts[0] != "k4" {
-                return Err(WebtokenError::InvalidKey("Invalid PASERK version".into()));
+        let parts: Vec<&str> = s.split('.').collect();
+        // Catch anything that looks like a version prefix (e.g. k4, k1, xx, v1)
+        if parts.len() >= 2 && parts[0].len() == 2 {
+            if parts[0] != "k4" {
+                return Err(WebtokenError::InvalidKey(format!("Invalid PASERK version: {}.", parts[0])));
             }
-            if parts[1] != expected_header {
-                if expected_header == "public" && parts[1] == "secret" {
-                    // Fallthrough
-                } else {
-                     return Err(WebtokenError::InvalidKey(format!("Expected PASERK type {}, got {}", expected_header, parts[1])));
+            
+            let paserk_type = parts[1];
+            
+            // Route missing wrapping key/password errors exactly like pyseto
+            if expected_header == "public" {
+                if paserk_type == "secret-wrap" && parts.len() == 3 {
+                    return Err(WebtokenError::InvalidKey("secret-wrap needs wrapping_key.".into()));
+                }
+                if paserk_type == "secret-pw" && parts.len() == 3 {
+                    return Err(WebtokenError::InvalidKey("secret-pw needs password.".into()));
+                }
+            } else if expected_header == "local" {
+                if paserk_type == "local-wrap" && parts.len() == 3 {
+                    return Err(WebtokenError::InvalidKey("local-wrap needs wrapping_key.".into()));
+                }
+                if paserk_type == "local-pw" && parts.len() == 3 {
+                    return Err(WebtokenError::InvalidKey("local-pw needs password.".into()));
+                }
+                if paserk_type == "seal" && parts.len() == 3 {
+                    return Err(WebtokenError::InvalidKey("seal needs unsealing_key.".into()));
                 }
             }
-            let raw = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| WebtokenError::InvalidKey("Invalid PASERK encoding".into()))?;
+
+            if parts.len() != 3 {
+                return Err(WebtokenError::InvalidKey("Invalid PASERK format.".into()));
+            }
+            
+            if paserk_type != expected_header {
+                if expected_header == "public" && paserk_type == "secret" {
+                    // Fallthrough: secret can be used as public
+                } else {
+                    return Err(WebtokenError::InvalidKey(format!("Invalid PASERK type: {}.", paserk_type)));
+                }
+            }
+            
+            let raw = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| WebtokenError::InvalidKey("Invalid PASERK encoding.".into()))?;
             return Ok(raw);
         }
     }
@@ -81,10 +111,16 @@ pub fn encrypt_v4_local(
     implicit_assertion: Option<&[u8]>,
     nonce_opt: Option<&[u8]>
 ) -> Result<String, WebtokenError> {
-    // [PASERK Support] Automatically unwrap "k4.local..." strings
-    let raw_key = decode_paserk_key(key, "local")?;
-    let key_arr: [u8; 32] = raw_key.try_into().map_err(|_| WebtokenError::InvalidKey("Local key must be 32 bytes".into()))?;
     
+    // Automatically unwrap "k4.local..." strings
+    let raw_key = decode_paserk_key(key, "local")?;
+    if raw_key.is_empty() { 
+        return Err(WebtokenError::InvalidKey("key must be specified.".into())); }
+    if raw_key.len() > 64 { 
+        return Err(WebtokenError::InvalidKey("key length must be up to 64 bytes.".into())); }
+    
+    let key_arr: [u8; 32] = raw_key.try_into().map_err(|_| WebtokenError::InvalidKey("key must be 32 bytes long.".into()))?;
+
     let footer_bytes = footer.unwrap_or(b"");
     let assertion = implicit_assertion.unwrap_or(b"");
 
@@ -535,3 +571,17 @@ pub fn paserk_unseal(unsealing_key: &[u8], paserk: &str) -> Result<Vec<u8>, Webt
 }
 
 
+#[pyfunction(name = "decode_paserk_key")]
+#[pyo3(signature = (key, purpose))]
+fn decode_paserk_key_py(key: crate::BytesOrString, purpose: &str) -> PyResult<Vec<u8>> {
+    
+    let raw_key = decode_paserk_key(key.as_bytes(), purpose).map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+    Ok(raw_key) 
+}
+
+
+pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(decode_paserk_key_py, m)?)?;
+
+    Ok(())
+}

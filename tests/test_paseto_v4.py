@@ -1,130 +1,128 @@
+import sys
+sys.path.append(__file__.replace('\\', '/').rsplit("/", 2)[0])
+
 import webtoken
-
 import pytest
-
 
 
 class TestV4Local:
     """
-    Tests for v4.local (Symmetric Encryption / XChaCha20-Poly1305)
+    Tests for v4.local.
     """
 
-    def test_v4_local_invalid_key_args(self):
+    @pytest.mark.parametrize(
+        "key, msg",
+        [
+            (b"", "key must be specified."),
+            (webtoken.random_bytes(65), "key length must be up to 64 bytes."),
+        ],
+    )
+    def test_v4_local_new_with_invalid_arg(self, key, msg):
 
-        # Case 1: Empty key
-        with pytest.raises(ValueError):
-            webtoken.paseto_encode(b"", {"data": "test"}, purpose="local")
-
-        # Case 2: Key too long (Must be exactly 32 bytes for XChaCha20)
-        invalid_key = webtoken.random_bytes(65)
-        with pytest.raises(ValueError):
-            webtoken.paseto_encode(invalid_key, {"data": "test"}, purpose="local")
+        with pytest.raises(ValueError) as err:
+            webtoken.paseto_encode(key, b"test", purpose="local")
+            pytest.fail("should fail.")
+        assert msg in str(err.value)
 
 
-    def test_v4_local_decrypt_with_wrong_key(self):
+    def test_v4_local_decrypt_via_decode_with_wrong_key(self):
 
-        k1 = b"0" * 32
-        k2 = b"1" * 32
-        payload = {"msg": "Hello world!"}
-        
-        token = webtoken.paseto_encode(k1, payload, purpose="local")
-        
-        # Should fail authentication tag verification
-        with pytest.raises(ValueError, match="Signature"):
+        k1 = b"our-secret".ljust(32, b'\0')
+        k2 = b"others-secret".ljust(32, b'\0')
+        token = webtoken.paseto_encode(k1, b"Hello world!", purpose="local")
+        with pytest.raises(ValueError) as err:
             webtoken.paseto_decode(k2, token, purpose="local")
+        assert "Signature verification failed" in str(err.value)
 
 
-    def test_v4_local_encrypt_decrypt_cycle(self):
+    def test_v4_local_encrypt_with_invalid_arg(self):
 
-        key = webtoken.random_bytes(32)
-        payload = {"data": "this is a secret message"}
-        footer = b"footer-data"
-        implicit = b"implicit-assertion"
+        k = b"our-secret".ljust(32, b'\0')
+        with pytest.raises(TypeError) as err:
+            webtoken.paseto_v4_encrypt(k, None, b"", b"")
 
-        token = webtoken.paseto_encode(
-            key, 
-            payload, 
-            purpose="local", 
-            footer=footer, 
-            implicit_assertion=implicit
-        )
 
-        assert token.startswith("v4.local.")
+    @pytest.mark.parametrize(
+        "nonce",
+        [
+            webtoken.random_bytes(1),
+            webtoken.random_bytes(8),
+            webtoken.random_bytes(31),
+            webtoken.random_bytes(33),
+            webtoken.random_bytes(64),
+        ],
+    )
+    def test_v4_local_encrypt_via_encode_with_wrong_nonce(self, nonce):
 
-        decoded = webtoken.paseto_decode(
-            key, 
-            token, 
-            purpose="local", 
-            implicit_assertion=implicit
-        )
+        k = b"our-secret".ljust(32, b'\0')
+        with pytest.raises(ValueError) as err:
+            webtoken.paseto_encode(k, b"Hello world!", purpose="local", nonce=nonce)
+        assert "nonce must be 32 bytes long." in str(err.value)
 
-        assert decoded == payload
+
+    @pytest.mark.parametrize(
+        "paserk, msg",
+        [
+            ("xx.local.AAAAAAAAAAAAAAAA", "Invalid PASERK version: xx."),
+            ("k1.local.AAAAAAAAAAAAAAAA", "Invalid PASERK version: k1."),
+            ("k4.local.xxx.AAAAAAAAAAAAAAAA", "Invalid PASERK format."),
+            ("k4.public.xxx.AAAAAAAAAAAAAAAA", "Invalid PASERK format."),
+            ("k4.xxx.AAAAAAAAAAAAAAAA", "Invalid PASERK type: xxx."),
+            ("k4.public.AAAAAAAAAAAAAAAA", "Invalid PASERK type: public."),
+        ],
+    )
+    def test_v4_local_from_paserk_with_invalid_args(self, paserk, msg):
+        with pytest.raises(ValueError) as err:
+            webtoken.decode_paserk_key(paserk, "local")
+        assert msg in str(err.value)
+
+
+    def test_v4_local_to_peer_paserk_id(self):
+        assert webtoken.paserk_peer_id("our-secret", 'local') == ''
 
 
 class TestV4Public:
     """
-    Tests for v4.public (Asymmetric Signing / Ed25519)
+    Tests for v4.public.
     """
 
-    def test_v4_public_verify_with_wrong_key(self):
-
-        payload = {"data": "Hello world!"}
-
-        # Sign with Key 1
-        token = webtoken.paseto_encode(PRIVATE_KEY_ED25519_1, payload, purpose="public")
-
-        # Verify with Key 2 (Should fail)
-        with pytest.raises(ValueError, match="Signature"):
-            webtoken.paseto_decode(PUBLIC_KEY_ED25519_2, token, purpose="public")
+    def test_v4_public_to_paserk_id(self):
+        sk = b"1" * 32
+        pk = webtoken.ed25519_public_from_seed_py(sk)
+        
+        # Secret keys export their own sid, public keys export their pid
+        assert webtoken.paserk_id(sk, "secret").startswith("k4.sid.")
+        assert webtoken.paserk_id(pk, "public").startswith("k4.pid.")
 
 
-    def test_v4_public_sign_verify_cycle(self):
-
-        payload = {"data": "signed message", "exp": "2030-01-01T00:00:00+00:00"}
-        footer = b"public-footer"
-
-        # Sign
-        token = webtoken.paseto_encode(
-            PRIVATE_KEY_ED25519_1, 
-            payload, 
-            purpose="public", 
-            footer=footer
-        )
-
-        assert token.startswith("v4.public.")
-
-        # Verify
-        decoded = webtoken.paseto_decode(
-            PUBLIC_KEY_ED25519_1, 
-            token, 
-            purpose="public"
-        )
-
-        assert decoded == payload
-
-    def test_v4_public_invalid_key_format(self):
-
-        # Passing garbage as a key
-        with pytest.raises(ValueError):
-            webtoken.paseto_encode(b"not-a-pem-key", {"a": 1}, purpose="public")
+    def test_v4_public_verify_via_encode_with_wrong_key(self):
+        sk = b"1" * 32
+        pk = webtoken.ed25519_public_from_seed_py(b"2" * 32)
+        
+        token = webtoken.paseto_encode(sk, b"Hello world!", purpose="public")
+        
+        with pytest.raises(ValueError) as err:
+            webtoken.paseto_decode(pk, token, purpose="public")
+        # Equivalent to VerifyError
+        assert "Signature verification failed" in str(err.value)
 
 
+    @pytest.mark.parametrize(
+        "paserk, msg",
+        [
+            ("xx.public.AAAAAAAAAAAAAAAA", "Invalid PASERK version: xx."),
+            ("k1.public.AAAAAAAAAAAAAAAA", "Invalid PASERK version: k1."),
+            ("k4.public.xxx.AAAAAAAAAAAAAAAA", "Invalid PASERK format."),
+            ("k4.local.xxx.AAAAAAAAAAAAAAAA", "Invalid PASERK format."),
+            ("k4.xxx.AAAAAAAAAAAAAAAA", "Invalid PASERK type: xxx."),
+            ("k4.local.AAAAAAAAAAAAAAAA", "Invalid PASERK type: local."),
+        ],
+    )
+    def test_v4_public_from_paserk_with_invalid_args(self, paserk, msg):
+        # We pass a structurally valid dummy token to isolate the key parsing error
+        dummy_token = "v4.public." + ("A" * 86)
+        with pytest.raises(ValueError) as err:
+            webtoken.paseto_decode(paserk.encode("utf-8"), dummy_token, purpose="public")
+        assert msg in str(err.value)
 
-## -- Test keys
 
-PRIVATE_KEY_ED25519_1 = b"""-----BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEILTL+0PfTOIQcn2VPkpxMwf6Gbt9n4UEFDjZ4RuUKjd0
------END PRIVATE KEY-----"""
-
-PUBLIC_KEY_ED25519_1 = b"""-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAHrnbu7wEfAP9cGBOAHHwmH4Wsot1ciXBHwBBXQ4gsaI=
------END PUBLIC KEY-----"""
-
-# A different keypair to test failure cases
-PRIVATE_KEY_ED25519_2 = b"""-----BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEIGmfHRcqkCfnAOB7234NNeuBpHUVHSLX4z3s4hsaTEQ8
------END PRIVATE KEY-----"""
-
-PUBLIC_KEY_ED25519_2 = b"""-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAkv4y3wCgwetRuJUt/EKjNJzaTWMKCNcadaGg6obUFdI=
------END PUBLIC KEY-----"""

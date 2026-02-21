@@ -1,7 +1,7 @@
 use std::{
     str::from_utf8, 
     collections::{HashSet, HashMap},
-    sync::{OnceLock, RwLock}
+    sync::{OnceLock, RwLock},
 };
 
 use serde_json::{from_slice, from_str, to_vec, Value, Map};
@@ -79,6 +79,38 @@ pub enum BytesOrString {
     Str(String),
     #[pyo3(transparent)]
     Bytes(Vec<u8>),
+}
+
+
+impl AsRef<[u8]> for BytesOrString {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            BytesOrString::Str(s) => s.as_bytes(),
+            BytesOrString::Bytes(b) => b.as_slice(),
+        }
+    }
+}
+
+
+// impl std::ops::Deref for BytesOrString {
+//     type Target = [u8];
+
+//     fn deref(&self) -> &Self::Target {
+//         match self {
+//             BytesOrString::Str(s) => s.as_bytes(),
+//             BytesOrString::Bytes(b) => b.as_slice(),
+//         }
+//     }
+// }
+
+
+impl BytesOrString {
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            BytesOrString::Str(s) => s.as_bytes(),
+            BytesOrString::Bytes(b) => b.as_slice(),
+        }
+    }
 }
 
 
@@ -700,7 +732,6 @@ fn decode<'py>(
 #[pyfunction]
 #[pyo3(signature = (payload, key, alg="dir", enc="XC20P", extra_headers=None))]
 fn encrypt(payload: BytesOrString, key: &[u8], alg: &str, enc: &str, extra_headers: Option<String>) -> PyResult<String> {
-    let payload_bytes: Vec<u8> = payload.into();
     
     // Construct the protected header
     let mut protected_header = serde_json::json!({
@@ -722,8 +753,9 @@ fn encrypt(payload: BytesOrString, key: &[u8], alg: &str, enc: &str, extra_heade
         }
     }
 
-    jwe::encrypt_compact(&protected_header, &payload_bytes, key).map_err(PyErr::from)
+    jwe::encrypt_compact(&protected_header, payload.as_bytes(), key).map_err(PyErr::from)
 }
+
 
 #[pyfunction]
 fn decrypt<'py>(py: Python<'py>, token: &str, key: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
@@ -842,8 +874,7 @@ fn validate_claims(
 #[pyfunction]
 fn load_key_from_pem(key_data: BytesOrString) -> PyResult<PyJWK> {
 
-    let pem_bytes: Vec<u8> = key_data.into();
-    let json_str = crate::jwk::pem_to_jwk(&pem_bytes).map_err(|e| PyValueError::new_err(e))?;
+    let json_str = jwk::pem_to_jwk(&<Vec<u8>>::from(key_data)).map_err(|e| PyValueError::new_err(e))?;
     let val: serde_json::Value = from_str(&json_str).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let alg = val.get("alg").and_then(|s| s.as_str()).map(|s| s.to_string());
 
@@ -862,23 +893,26 @@ fn paseto_encode(
     implicit_assertion: Option<&[u8]>,
     nonce: Option<&[u8]>
 ) -> PyResult<String> {
-    let key_bytes: Vec<u8> = key.into();
-    let data: Value = depythonize(payload).map_err(|e| PyValueError::new_err(format!("Serialization failed: {}", e)))?;
-    let payload_bytes = to_vec(&data).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let payload_bytes: Vec<u8> = if let Ok(py_bytes) = payload.cast::<pyo3::types::PyBytes>() {
+        py_bytes.as_bytes().to_vec()
+    } else {
+        let val: serde_json::Value = pythonize::depythonize(payload)
+            .map_err(|e| PyValueError::new_err(format!("Serialization failed: {}", e)))?;
+        serde_json::to_vec(&val).map_err(|_| PyValueError::new_err("JSON encoding failed"))?
+    };
 
     match purpose {
         "local" => {
-            // [FIX] Call paseto.rs (which handles PASERK strings) instead of crypto.rs directly
-            crate::paseto::encrypt_v4_local(
+            paseto::encrypt_v4_local(
                 &payload_bytes, 
-                &key_bytes, 
+                key.as_bytes(), 
                 footer, 
                 implicit_assertion, 
                 nonce
             ).map_err(|e| PyValueError::new_err(format!("{}", e)))
         },
         "public" => {
-            crate::paseto::sign_v4_public(&payload_bytes, &key_bytes, footer, implicit_assertion)
+            paseto::sign_v4_public(&payload_bytes, key.as_bytes(), footer, implicit_assertion)
                 .map_err(|e| PyValueError::new_err(format!("{}", e)))
         },
         _ => Err(PyValueError::new_err("Purpose must be 'local' or 'public'"))
@@ -895,49 +929,61 @@ fn paseto_decode<'py>(
     purpose: &str,
     implicit_assertion: Option<&[u8]>
 ) -> PyResult<Bound<'py, PyAny>> {
-    let key_bytes: Vec<u8> = key.into();
 
     let (payload_bytes, _footer) = match purpose {
         "local" => {
-             // [FIX] Explicitly map errors to PyValueError here
-             crate::paseto::decrypt_v4_local(token, &key_bytes, implicit_assertion)
+             paseto::decrypt_v4_local(token, key.as_bytes(), implicit_assertion)
                 .map_err(|e| PyValueError::new_err(format!("{}", e)))?
         },
         "public" => {
-             // [FIX] Explicitly map errors to PyValueError here
-             crate::paseto::verify_v4_public(token, &key_bytes, implicit_assertion)
+             paseto::verify_v4_public(token, key.as_bytes(), implicit_assertion)
                 .map_err(|e| PyValueError::new_err(format!("{}", e)))?
         },
         _ => return Err(PyValueError::new_err("Purpose must be 'local' or 'public'"))
     };
 
-    let val: Value = from_slice(&payload_bytes).map_err(|e| PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
-    let py_obj = pythonize(py, &val).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
-    Ok(py_obj)
+    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&payload_bytes) {
+        if let Ok(py_obj) = pythonize::pythonize(py, &val) {
+            return Ok(py_obj);
+        }
+    }
+
+    Ok(pyo3::types::PyBytes::new(py, &payload_bytes).into_any())
 }
 
 
 #[pyfunction]
 #[pyo3(signature = (payload, key, footer=None, implicit_assertion=None))]
 fn paseto_sign(payload: &[u8], key: &[u8], footer: Option<&[u8]>, implicit_assertion: Option<&[u8]>) -> PyResult<String> {
-    // This calls the previously unused sign_v4_public
-    crate::paseto::sign_v4_public(payload, key, footer, implicit_assertion).map_err(PyErr::from)
+    paseto::sign_v4_public(payload, key, footer, implicit_assertion).map_err(PyErr::from)
 }
 
 
 #[pyfunction]
 fn paseto_verify<'py>(py: Python<'py>, token: &str, key: &[u8], implicit_assertion: Option<&[u8]>) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
-    // This calls the previously unused verify_v4_public
-    let (payload, footer) = crate::paseto::verify_v4_public(token, key, implicit_assertion).map_err(PyErr::from)?;
+    let (payload, footer) = paseto::verify_v4_public(token, key, implicit_assertion).map_err(PyErr::from)?;
     Ok((PyBytes::new(py, &payload), PyBytes::new(py, &footer)))
 }
 
 
 #[pyfunction]
 fn paserk_id(key: BytesOrString, purpose: &str) -> PyResult<String> {
-    let key_bytes: Vec<u8> = key.into();
-    crate::paseto::calculate_paserk_id(&key_bytes, purpose).map_err(PyErr::from)
+    paseto::calculate_paserk_id(key.as_bytes(), purpose).map_err(PyErr::from)
+}
+
+
+#[pyfunction]
+#[pyo3(signature = (key, purpose))]
+fn paserk_peer_id(key: BytesOrString, purpose: &str) -> PyResult<String> {
+    match purpose {
+        "local" | "public" => { Ok("".to_string())},
+        "secret" => {
+            let pub_key = crypto::ed25519_public_from_seed(key.as_bytes()).map_err(|_| PyValueError::new_err(
+                "Invalid Ed25519 secret key"))?;
+            paseto::calculate_paserk_id(&pub_key, "public").map_err(PyErr::from)
+        },
+        _ => Err(PyValueError::new_err("Purpose must be 'local', 'public', or 'secret'")),
+    }
 }
 
 
@@ -951,7 +997,6 @@ fn paserk_wrap(
     sealing_key: Option<BytesOrString>,
     options: Option<&Bound<'_, PyDict>>
 ) -> PyResult<String> {
-    let key_bytes: Vec<u8> = key.into();
     
     // 1. Password-Based Key Wrapping (PBKW)
     if let Some(pw) = password {
@@ -965,14 +1010,14 @@ fn paserk_wrap(
             if let Ok(Some(v)) = opts.get_item("opslimit") { opslimit = v.extract::<u32>()?; }
         }
 
-        return crate::paseto::paserk_wrap_pbkw(&pw_bytes, &key_bytes, purpose, memlimit, opslimit, parallelism)
+        return paseto::paserk_wrap_pbkw(&pw_bytes, key.as_bytes(), purpose, memlimit, opslimit, parallelism)
             .map_err(|e| PyValueError::new_err(format!("{}", e)));
     }
     
     // 2. Platform-Independent Encryption (PIE)
     if let Some(wk) = wrapping_key {
         let wk_bytes: Vec<u8> = wk.into();
-        return crate::paseto::paserk_wrap_pie(&wk_bytes, &key_bytes, purpose)
+        return paseto::paserk_wrap_pie(&wk_bytes, key.as_bytes(), purpose)
             .map_err(|e| PyValueError::new_err(format!("{}", e)));
     }
 
@@ -980,13 +1025,13 @@ fn paserk_wrap(
     if let Some(sk) = sealing_key {
         let sk_bytes: Vec<u8> = sk.into();
         let stripped_sk = crypto::extract_x25519_bytes(&sk_bytes).unwrap_or(sk_bytes.clone());
-        return crate::paseto::paserk_seal(&stripped_sk, &key_bytes)
+        return paseto::paserk_seal(&stripped_sk, key.as_bytes())
             .map_err(|e| PyValueError::new_err(format!("{}", e)));
     }
 
     // 4. Basic Serialization
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    let b64_key = URL_SAFE_NO_PAD.encode(&key_bytes);
+    let b64_key = URL_SAFE_NO_PAD.encode(key.as_bytes());
     match purpose {
         "local" => Ok(format!("k4.local.{}", b64_key)),
         "public" => Ok(format!("k4.public.{}", b64_key)),
@@ -1009,7 +1054,7 @@ fn paserk_unwrap<'py>(
     // 1. Password-Based Key Unwrapping (PBKW)
     if let Some(pw) = password {
         let pw_bytes: Vec<u8> = pw.into();
-        let unwrapped = crate::paseto::paserk_unwrap_pbkw(&pw_bytes, paserk)
+        let unwrapped = paseto::paserk_unwrap_pbkw(&pw_bytes, paserk)
             .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
         return Ok(PyBytes::new(py, &unwrapped));
     }
@@ -1017,7 +1062,7 @@ fn paserk_unwrap<'py>(
     // 2. Platform-Independent Decryption (PIE)
     if let Some(wk) = wrapping_key {
         let wk_bytes: Vec<u8> = wk.into();
-        let unwrapped = crate::paseto::paserk_unwrap_pie(&wk_bytes, paserk)
+        let unwrapped = paseto::paserk_unwrap_pie(&wk_bytes, paserk)
             .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
         return Ok(PyBytes::new(py, &unwrapped));
     }
@@ -1026,7 +1071,7 @@ fn paserk_unwrap<'py>(
     if let Some(uk) = unsealing_key {
         let uk_bytes: Vec<u8> = uk.into();
         let stripped_uk = crate::crypto::extract_x25519_bytes(&uk_bytes).unwrap_or(uk_bytes.clone());
-        let unwrapped = crate::paseto::paserk_unseal(&stripped_uk, paserk)
+        let unwrapped = paseto::paserk_unseal(&stripped_uk, paserk)
             .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
         return Ok(PyBytes::new(py, &unwrapped));
     }
@@ -1102,6 +1147,7 @@ fn _webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(paseto_sign, m)?)?;
     m.add_function(wrap_pyfunction!(paseto_verify, m)?)?;
     m.add_function(wrap_pyfunction!(paserk_id, m)?)?;
+    m.add_function(wrap_pyfunction!(paserk_peer_id, m)?)?;
     m.add_function(wrap_pyfunction!(paserk_wrap, m)?)?;
     m.add_function(wrap_pyfunction!(paserk_unwrap, m)?)?;
 
@@ -1110,8 +1156,9 @@ fn _webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pem_to_jwk, m)?)?;
     m.add_function(wrap_pyfunction!(check_rsa_key_length, m)?)?;
 
-    crypto::export_functions(m)?; // Unified crypto export
     py_utils::export_py_utils(m)?;
+    crypto::export_functions(m)?; 
+    paseto::export_functions(m)?;
 
     add_submodule_with_sys(py, m, "api_jwk", |_py, mod_| {
         mod_.add_class::<PyJWK>()?;

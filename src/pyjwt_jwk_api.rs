@@ -17,7 +17,7 @@ create_exception!(toke, PyJWKSetError, PyJWTError);
 create_exception!(toke, PyJWKError, PyJWTError);
 
 
-#[pyclass(name = "PyJWK")]
+#[pyclass(name = "PyJWK", from_py_object)]
 #[derive(Clone)]
 pub struct PyJWK {
     pub inner: Value, 
@@ -500,7 +500,7 @@ impl PyJWKSetIterator {
     fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<PyJWK> { slf.iter.next() }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct PyRSAPublicNumbers { #[pyo3(get)] n: Py<PyAny>, #[pyo3(get)] e: Py<PyAny> }
 #[pymethods]
@@ -511,13 +511,15 @@ impl PyRSAPublicNumbers {
     }
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyRSAPrivateNumbers { 
     #[pyo3(get)] p: Py<PyAny>, #[pyo3(get)] q: Py<PyAny>, #[pyo3(get)] d: Py<PyAny>, 
     #[pyo3(get)] dmp1: Py<PyAny>, #[pyo3(get)] dmq1: Py<PyAny>, #[pyo3(get)] iqmp: Py<PyAny>, 
     #[pyo3(get)] public_numbers: PyRSAPublicNumbers,
 }
+
+
 #[pymethods]
 impl PyRSAPrivateNumbers {
     fn __eq__(&self, other: &PyRSAPrivateNumbers, py: Python) -> bool {
@@ -526,9 +528,12 @@ impl PyRSAPrivateNumbers {
     }
 }
 
-#[pyclass]
+
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct PyEllipticCurvePublicNumbers { #[pyo3(get)] x: Py<PyAny>, #[pyo3(get)] y: Py<PyAny> }
+
+
 #[pymethods]
 impl PyEllipticCurvePublicNumbers {
     fn __eq__(&self, other: &PyEllipticCurvePublicNumbers, py: Python) -> bool {
@@ -537,11 +542,14 @@ impl PyEllipticCurvePublicNumbers {
     }
 }
 
-#[pyclass]
+
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyEllipticCurvePrivateNumbers {
     #[pyo3(get)] private_value: Py<PyAny>, #[pyo3(get)] public_numbers: PyEllipticCurvePublicNumbers,
 }
+
+
 #[pymethods]
 impl PyEllipticCurvePrivateNumbers {
     fn __eq__(&self, other: &PyEllipticCurvePrivateNumbers, py: Python) -> bool {

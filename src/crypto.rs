@@ -803,7 +803,7 @@ pub fn paseto_v4_encrypt(
 ) -> Result<Vec<u8>, WebtokenError> {
     
     let nonce_vec = if let Some(n) = nonce_opt {
-        if n.len() != 32 { return Err(WebtokenError::InvalidToken("PASETO v4 Nonce must be 32 bytes".into())); }
+        if n.len() != 32 { return Err(WebtokenError::InvalidToken("nonce must be 32 bytes long.".into())); }
         n.to_vec()
     } else {
         get_random_bytes(32)?
@@ -856,6 +856,7 @@ pub fn paseto_v4_encrypt(
     output.extend_from_slice(t_hash.as_bytes());
     Ok(output)
 }
+
 
 pub fn paseto_v4_decrypt(
     key: &[u8; 32], body: &[u8], footer: &[u8], implicit: &[u8]
@@ -1187,6 +1188,43 @@ pub fn x25519_derive_py(private_key: &[u8], peer_public_key: &[u8]) -> PyResult<
 }
 
 
+#[pyfunction(name = "paseto_v4_encrypt")]
+#[pyo3(signature = (key, payload, footer=None, implicit=None, nonce=None))]
+fn paseto_v4_encrypt_py<'py>(
+    py: Python<'py>,
+    key: &[u8],
+    payload: &[u8],
+    footer: Option<&[u8]>,
+    implicit: Option<&[u8]>,
+    nonce: Option<&[u8]>,
+) -> PyResult<Bound<'py, PyBytes>> {
+
+    let key_arr: &[u8; 32] = key.try_into().map_err(|_| PyValueError::new_err(
+        "Key must be exactly 32 bytes"))?;
+
+    let out = paseto_v4_encrypt(key_arr, payload, footer.unwrap_or(b""), implicit.unwrap_or(b""), nonce)
+        .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+
+    Ok(PyBytes::new(py, &out))
+}
+
+
+#[pyfunction(name = "paseto_v4_decrypt")]
+#[pyo3(signature = (key, body, footer=None, implicit=None))]
+fn paseto_v4_decrypt_py<'py>(py: Python<'py>, key: &[u8], body: &[u8], footer: Option<&[u8]>, implicit: Option<&[u8]>,
+) -> PyResult<Bound<'py, PyBytes>> {
+
+    let key_arr: &[u8; 32] = key.try_into().map_err(|_| PyValueError::new_err(
+        "Key must be exactly 32 bytes"))?;
+
+    let out = paseto_v4_decrypt(key_arr, body, footer.unwrap_or(b""), implicit.unwrap_or(b"")).map_err(|e| PyValueError::new_err(
+        format!("{}", e)))?;
+
+    Ok(PyBytes::new(py, &out))
+}
+
+
+
 pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(digest, m)?)?;
     m.add_function(wrap_pyfunction!(load_pem_private_key, m)?)?;
@@ -1204,5 +1242,8 @@ pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ed25519_public_from_seed_py, m)?)?;
     m.add_function(wrap_pyfunction!(x25519_public_from_private_py, m)?)?;
     m.add_function(wrap_pyfunction!(x25519_derive_py, m)?)?;
+    m.add_function(wrap_pyfunction!(paseto_v4_encrypt_py, m)?)?;
+    m.add_function(wrap_pyfunction!(paseto_v4_decrypt_py, m)?)?;
+    
     Ok(())
 }
