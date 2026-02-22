@@ -74,7 +74,7 @@ fn decode_paserk_key(key: &[u8], expected_header: &str) -> Result<Vec<u8>, Webto
 
 
 pub fn calculate_paserk_id(key: &[u8], purpose: &str) -> Result<String, WebtokenError> {
-    // 1. Construct the exact PASERK string
+
     let paserk_string = match purpose {
         "local" => format!("k4.local.{}", URL_SAFE_NO_PAD.encode(key)),
         "public" => format!("k4.public.{}", URL_SAFE_NO_PAD.encode(key)),
@@ -82,7 +82,6 @@ pub fn calculate_paserk_id(key: &[u8], purpose: &str) -> Result<String, Webtoken
         _ => return Err(WebtokenError::Generic("Invalid PASERK purpose".into())),
     };
 
-    // 2. Determine the target ID header
     let header = match purpose {
         "local" => "k4.lid.",
         "public" => "k4.pid.",
@@ -90,11 +89,9 @@ pub fn calculate_paserk_id(key: &[u8], purpose: &str) -> Result<String, Webtoken
         _ => unreachable!(),
     };
 
-    // 3. Hash the header AND the PASERK string, strictly extracting 33 bytes
+    // Hash the header and the PASERK string, extracting 33 bytes
     let hash_input = format!("{}{}", header, paserk_string);
-    let hash = Blake2bParams::new()
-        .hash_length(33) // The PASERK spec explicitly mandates a 33-byte output
-        .hash(hash_input.as_bytes());
+    let hash = Blake2bParams::new().hash_length(33) .hash(hash_input.as_bytes());
 
     Ok(format!("{}{}", header, URL_SAFE_NO_PAD.encode(hash.as_bytes())))
 }
@@ -104,15 +101,9 @@ pub fn calculate_paserk_id(key: &[u8], purpose: &str) -> Result<String, Webtoken
 //  v4 Local (Symmetric)
 // ============================================================================
 
-pub fn encrypt_v4_local(
-    payload: &[u8], 
-    key: &[u8], 
-    footer: Option<&[u8]>, 
-    implicit_assertion: Option<&[u8]>,
-    nonce_opt: Option<&[u8]>
-) -> Result<String, WebtokenError> {
+pub fn encrypt_v4_local(payload: &[u8], key: &[u8], footer: Option<&[u8]>, implicit_assertion: Option<&[u8]>, 
+    nonce_opt: Option<&[u8]>) -> Result<String, WebtokenError> {
     
-    // Automatically unwrap "k4.local..." strings
     let raw_key = decode_paserk_key(key, "local")?;
     if raw_key.is_empty() { 
         return Err(WebtokenError::InvalidKey("key must be specified.".into())); }
@@ -120,14 +111,11 @@ pub fn encrypt_v4_local(
         return Err(WebtokenError::InvalidKey("key length must be up to 64 bytes.".into())); }
     
     let key_arr: [u8; 32] = raw_key.try_into().map_err(|_| WebtokenError::InvalidKey("key must be 32 bytes long.".into()))?;
-
     let footer_bytes = footer.unwrap_or(b"");
     let assertion = implicit_assertion.unwrap_or(b"");
 
-    // Perform PASETO v4 Encryption
     let body = crypto::paseto_v4_encrypt(&key_arr, payload, footer_bytes, assertion, nonce_opt)?;
 
-    // Format: v4.local.base64(body).base64(footer)
     let mut token = String::from("v4.local.");
     token.push_str(&URL_SAFE_NO_PAD.encode(&body));
     
@@ -140,7 +128,7 @@ pub fn encrypt_v4_local(
 }
 
 pub fn decrypt_v4_local(token: &str, key: &[u8], implicit_assertion: Option<&[u8]>) -> Result<(Vec<u8>, Vec<u8>), WebtokenError> {
-    // [PASERK Support]
+
     let raw_key = decode_paserk_key(key, "local")?;
     let key_arr: [u8; 32] = raw_key.try_into().map_err(|_| WebtokenError::InvalidKey("Local key must be 32 bytes".into()))?;
     
