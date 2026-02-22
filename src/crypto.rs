@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
+use base64::{engine::general_purpose::{URL_SAFE_NO_PAD}, Engine as _};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::exceptions::PyValueError;
@@ -56,7 +56,9 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_integer::Integer;
 use num_traits::{One, Zero};
 
-use crate::WebtokenError;
+use crate::{WebtokenError, BytesOrString};
+use crate::crypto_parsing::{decode_key_bytes, wrap_pkcs1_as_pkcs8, extract_x25519_bytes,
+    to_pem, ssh_to_pem};
 
 const XCHACHA_KEY_LEN: usize = 32;
 const XCHACHA_NONCE_LEN: usize = 24;
@@ -69,144 +71,6 @@ pub fn get_random_bytes(length: usize) -> Result<Vec<u8>, WebtokenError> {
     Ok(out)
 }
 
-// ============================================================================
-//  DER / PEM / SSH Parsing Helpers
-// ============================================================================
-
-fn decode_key_bytes(data: &[u8]) -> Vec<u8> {
-    let s = std::str::from_utf8(data).unwrap_or("");
-    let trimmed = s.trim();
-    if trimmed.starts_with("-----BEGIN") {
-        let lines: Vec<&str> = trimmed.lines()
-            .filter(|l| !l.contains("-----BEGIN") && !l.contains("-----END"))
-            .collect();
-        let body = lines.join("");
-        if let Ok(der) = STANDARD.decode(&body) {
-            return der;
-        }
-    }
-    data.to_vec()
-}
-
-// Helper to extract raw 32-byte key from various formats (Raw, SPKI, PKCS#8)
-pub fn extract_x25519_bytes(data: &[u8]) -> Result<Vec<u8>, WebtokenError> {
-    let bytes = decode_key_bytes(data);
-    match bytes.len() {
-        32 => Ok(bytes),
-        // SPKI (Public Key): 30 2A 30 05 06 03 2B 65 6E 03 21 00 [32 bytes]
-        44 if bytes.starts_with(&[0x30, 0x2A, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x6E, 0x03, 0x21, 0x00]) => {
-            Ok(bytes[12..].to_vec())
-        },
-        // PKCS#8 (Private Key): 30 2E 02 01 00 30 05 06 03 2B 65 6E 04 22 04 20 [32 bytes]
-        48 if bytes.starts_with(&[0x30, 0x2E, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x6E, 0x04, 0x22, 0x04, 0x20]) => {
-            Ok(bytes[16..].to_vec())
-        },
-        _ => Err(WebtokenError::Generic(format!("Invalid X25519 key length or format: {}", bytes.len()))),
-    }
-}
-
-pub fn to_pem(tag: &str, data: &[u8]) -> Vec<u8> {
-    let mut pem = String::new();
-    pem.push_str(&format!("-----BEGIN {}-----\n", tag));
-    for chunk in STANDARD.encode(data).as_bytes().chunks(64) {
-        pem.push_str(std::str::from_utf8(chunk).unwrap());
-        pem.push('\n');
-    }
-    pem.push_str(&format!("-----END {}-----\n", tag));
-    pem.into_bytes()
-}
-
-// Manual DER encoding helpers for SSH conversion
-fn der_encode_len(out: &mut Vec<u8>, len: usize) {
-    if len < 128 { out.push(len as u8); } 
-    else if len < 256 { out.push(0x81); out.push(len as u8); } 
-    else { out.push(0x82); out.extend_from_slice(&(len as u16).to_be_bytes()); }
-}
-fn der_encode_int(out: &mut Vec<u8>, bytes: &[u8]) { 
-    out.push(0x02); 
-    let mut start=0; 
-    while start < bytes.len()-1 && bytes[start]==0 && (bytes[start+1]&0x80)==0 { start+=1; } 
-    let slice = &bytes[start..];
-    der_encode_len(out, slice.len());
-    out.extend_from_slice(slice); 
-}
-fn der_encode_sequence(content: &[u8]) -> Vec<u8> { 
-    let mut out = vec![0x30];
-    der_encode_len(&mut out, content.len());
-    out.extend_from_slice(content); 
-    out 
-}
-
-pub fn ssh_to_pem(data: &[u8]) -> Result<Vec<u8>, String> { 
-    let s = std::str::from_utf8(data).map_err(|_| "Invalid UTF-8")?; 
-    let parts: Vec<&str> = s.split_whitespace().collect(); 
-    if parts.len() < 2 { return Err("Invalid SSH key".into()); } 
-    let decoded = STANDARD.decode(parts[1]).map_err(|_| "Invalid Base64")?; 
-    let mut cursor = &decoded[..]; 
-    let read_string = |buf: &mut &[u8]| -> Result<Vec<u8>, String> { 
-        if buf.len() < 4 { return Err("Truncated".into()); } 
-        let len = u32::from_be_bytes(buf[0..4].try_into().unwrap()) as usize; 
-        *buf = &buf[4..]; 
-        if buf.len() < len { return Err("Truncated".into()); } 
-        let val = buf[0..len].to_vec(); 
-        *buf = &buf[len..]; 
-        Ok(val)
-    }; 
-    let header = read_string(&mut cursor)?; 
-    if parts[0] == "ssh-rsa" && header == b"ssh-rsa" { 
-        let e = read_string(&mut cursor)?; 
-        let n = read_string(&mut cursor)?; 
-        let mut seq = Vec::new(); 
-        der_encode_int(&mut seq, &n); 
-        der_encode_int(&mut seq, &e); 
-        return Ok(to_pem("RSA PUBLIC KEY", &der_encode_sequence(&seq)));
-    } 
-    else if parts[0] == "ssh-ed25519" && header == b"ssh-ed25519" { 
-        let key = read_string(&mut cursor)?; 
-        if key.len() != 32 { return Err("Invalid Ed25519 len".into()); } 
-        let alg_id = vec![0x06, 0x03, 0x2b, 0x65, 0x70]; 
-        let mut bit_string = vec![0x03, 0x21, 0x00]; 
-        bit_string.extend_from_slice(&key); 
-        let mut der = der_encode_sequence(&alg_id); 
-        der.extend_from_slice(&bit_string); 
-        return Ok(to_pem("PUBLIC KEY", &der_encode_sequence(&der)));
-    }
-    else if parts[0].starts_with("ecdsa-sha2-") {
-        let curve_id_bytes = read_string(&mut cursor)?;
-        let q = read_string(&mut cursor)?;
-        let curve_oid = match curve_id_bytes.as_slice() {
-            b"nistp256" => vec![0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07], 
-            b"nistp384" => vec![0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22], 
-            b"nistp521" => vec![0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x23], 
-            _ => return Err(format!("Unsupported ECDSA curve: {:?}", String::from_utf8_lossy(&curve_id_bytes))),
-        };
-        let id_ec_public_key = vec![0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
-        let mut algo_vec = Vec::new();
-        algo_vec.extend_from_slice(&id_ec_public_key);
-        algo_vec.extend_from_slice(&curve_oid);
-        let algo_seq = der_encode_sequence(&algo_vec);
-        let mut bit_string = vec![0x03];
-        der_encode_len(&mut bit_string, q.len() + 1);
-        bit_string.push(0x00);
-        bit_string.extend_from_slice(&q);
-        let mut spki = Vec::new();
-        spki.extend_from_slice(&algo_seq);
-        spki.extend_from_slice(&bit_string);
-        return Ok(to_pem("PUBLIC KEY", &der_encode_sequence(&spki)));
-    }
-    Err(format!("Unsupported SSH key type: {}", parts[0])) 
-}
-
-fn wrap_pkcs1_as_pkcs8(pkcs1: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&[0x02, 0x01, 0x00]); // Version
-    let algo = [0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00];
-    out.extend_from_slice(&algo);
-    out.push(0x04); // Octet String
-    der_encode_len(&mut out, pkcs1.len());
-    out.extend_from_slice(pkcs1);
-    der_encode_sequence(&out)
-}
 
 // ============================================================================
 //  RSA Math (Manual for JWK)
@@ -1044,35 +908,35 @@ fn digest(algorithm: &str, data: &[u8]) -> PyResult<Vec<u8>> {
     }
 }
 
+
 #[pyfunction]
 #[pyo3(signature = (data, password=None))]
-fn load_pem_private_key<'py>(
-    py: Python<'py>,
-    data: &[u8],
-    password: Option<&[u8]>,
-) -> PyResult<Bound<'py, PyBytes>> {
+fn load_pem_private_key(data: BytesOrString, password: Option<BytesOrString>,) -> PyResult<Vec<u8>> {
+
     if password.is_some() {
         return Err(PyValueError::new_err(
             "Encrypted keys not supported in test utils",
         ));
     }
-    let s = std::str::from_utf8(data)
-        .map_err(|_| PyValueError::new_err("Invalid UTF-8 in PEM"))?;
+    let s = std::str::from_utf8(data.as_bytes()).map_err(|_| PyValueError::new_err("Invalid UTF-8 in PEM"))?;
+
     if !s.trim().starts_with("-----BEGIN") {
         return Err(PyValueError::new_err("Invalid PEM format"));
     }
-    Ok(PyBytes::new(py, data))
+    Ok(data.as_bytes().to_vec())
 }
 
+
 #[pyfunction]
-fn load_pem_public_key<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-    let s = std::str::from_utf8(data)
-        .map_err(|_| PyValueError::new_err("Invalid UTF-8 in PEM"))?;
+fn load_pem_public_key(data: BytesOrString) -> PyResult<Vec<u8>> {
+
+    let s = std::str::from_utf8(data.as_bytes()).map_err(|_| PyValueError::new_err("Invalid UTF-8 in PEM"))?;
     if !s.trim().starts_with("-----BEGIN") {
         return Err(PyValueError::new_err("Invalid PEM format"));
     }
-    Ok(PyBytes::new(py, data))
+    Ok(data.as_bytes().to_vec())
 }
+
 
 #[pyfunction]
 fn load_ssh_public_key<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
@@ -1172,17 +1036,19 @@ fn decrypt_aes_256_gcm<'py>(
     Ok(PyBytes::new(py, &plaintext))
 }
 
-#[pyfunction]
-pub fn ed25519_public_from_seed_py(seed: &[u8]) -> PyResult<Vec<u8>> {
-    ed25519_public_from_seed(seed).map_err(PyErr::from)
+#[pyfunction(name = "ed25519_public_from_seed")]
+pub fn ed25519_public_from_seed_py(seed: BytesOrString) -> PyResult<Vec<u8>> {
+    ed25519_public_from_seed(seed.as_bytes()).map_err(PyErr::from)
 }
 
-#[pyfunction]
+
+#[pyfunction(name = "x25519_public_from_private")]
 pub fn x25519_public_from_private_py(private_key: &[u8]) -> PyResult<Vec<u8>> {
     x25519_public_from_private(private_key).map_err(PyErr::from)
 }
 
-#[pyfunction]
+
+#[pyfunction(name = "x25519_derive")]
 pub fn x25519_derive_py(private_key: &[u8], peer_public_key: &[u8]) -> PyResult<Vec<u8>> {
     x25519_derive(private_key, peer_public_key).map_err(PyErr::from)
 }

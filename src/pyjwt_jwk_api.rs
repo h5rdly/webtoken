@@ -81,8 +81,6 @@ impl PyJWK {
 
     #[getter]
     fn algorithm_name(&self) -> Option<String> {
-        // [FIX] Compatibility: Default to RS256 for RSA keys if unspecified,
-        // matching PyJWT behavior, while keeping the internal field None for flexibility.
         self.algorithm_name.clone().or_else(|| {
             if let Ok("RSA") = self.key_type().as_deref() {
                 Some("RS256".to_string())

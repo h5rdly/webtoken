@@ -6,9 +6,6 @@ import pytest
 
 
 class TestV4Local:
-    """
-    Tests for v4.local.
-    """
 
     @pytest.mark.parametrize(
         "key, msg",
@@ -82,28 +79,26 @@ class TestV4Local:
 
 
 class TestV4Public:
-    """
-    Tests for v4.public.
-    """
 
     def test_v4_public_to_paserk_id(self):
-        sk = b"1" * 32
-        pk = webtoken.ed25519_public_from_seed_py(sk)
+
+        sk_raw = webtoken.extract_ed25519_private_key(private_key_ed25519)
+        pk_raw = webtoken.extract_ed25519_public_key(public_key_ed25519)
         
         # Secret keys export their own sid, public keys export their pid
-        assert webtoken.paserk_id(sk, "secret").startswith("k4.sid.")
-        assert webtoken.paserk_id(pk, "public").startswith("k4.pid.")
+        assert webtoken.paserk_peer_id(sk_raw, 'secret') == webtoken.paserk_id(pk_raw, 'public')
+        assert webtoken.paserk_peer_id(pk_raw, 'public') == ''
 
 
     def test_v4_public_verify_via_encode_with_wrong_key(self):
-        sk = b"1" * 32
-        pk = webtoken.ed25519_public_from_seed_py(b"2" * 32)
-        
-        token = webtoken.paseto_encode(sk, b"Hello world!", purpose="public")
+
+        sk = "1" * 32
+        pk = webtoken.ed25519_public_from_seed("2" * 32)
+        token = webtoken.paseto_encode(sk, "Hello world!", purpose="public")
         
         with pytest.raises(ValueError) as err:
             webtoken.paseto_decode(pk, token, purpose="public")
-        # Equivalent to VerifyError
+
         assert "Signature verification failed" in str(err.value)
 
 
@@ -119,10 +114,22 @@ class TestV4Public:
         ],
     )
     def test_v4_public_from_paserk_with_invalid_args(self, paserk, msg):
-        # We pass a structurally valid dummy token to isolate the key parsing error
-        dummy_token = "v4.public." + ("A" * 86)
+
+        valid_dummy_token = "v4.public." + ("A" * 86)
         with pytest.raises(ValueError) as err:
-            webtoken.paseto_decode(paserk.encode("utf-8"), dummy_token, purpose="public")
+            webtoken.paseto_decode(paserk, valid_dummy_token, purpose="public")
         assert msg in str(err.value)
 
 
+
+private_key_ed25519 = '''
+-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEILTL+0PfTOIQcn2VPkpxMwf6Gbt9n4UEFDjZ4RuUKjd0
+-----END PRIVATE KEY-----
+'''
+
+public_key_ed25519 = '''
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAHrnbu7wEfAP9cGBOAHHwmH4Wsot1ciXBHwBBXQ4gsaI=
+-----END PUBLIC KEY-----
+'''

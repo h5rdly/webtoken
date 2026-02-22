@@ -18,6 +18,7 @@ use pythonize::{depythonize, pythonize};
 
 mod algorithms; 
 mod crypto; 
+mod crypto_parsing;
 mod jwt;
 mod jwk;
 mod jws;
@@ -82,8 +83,8 @@ pub enum BytesOrString {
 }
 
 
-impl AsRef<[u8]> for BytesOrString {
-    fn as_ref(&self) -> &[u8] {
+impl BytesOrString {
+    pub fn as_bytes(&self) -> &[u8] {
         match self {
             BytesOrString::Str(s) => s.as_bytes(),
             BytesOrString::Bytes(b) => b.as_slice(),
@@ -92,20 +93,8 @@ impl AsRef<[u8]> for BytesOrString {
 }
 
 
-// impl std::ops::Deref for BytesOrString {
-//     type Target = [u8];
-
-//     fn deref(&self) -> &Self::Target {
-//         match self {
-//             BytesOrString::Str(s) => s.as_bytes(),
-//             BytesOrString::Bytes(b) => b.as_slice(),
-//         }
-//     }
-// }
-
-
-impl BytesOrString {
-    pub fn as_bytes(&self) -> &[u8] {
+impl AsRef<[u8]> for BytesOrString {
+    fn as_ref(&self) -> &[u8] {
         match self {
             BytesOrString::Str(s) => s.as_bytes(),
             BytesOrString::Bytes(b) => b.as_slice(),
@@ -122,6 +111,19 @@ impl From<BytesOrString> for Vec<u8> {
         }
     }
 }
+
+
+// impl std::ops::Deref for BytesOrString {
+//     type Target = [u8];
+
+//     fn deref(&self) -> &Self::Target {
+//         match self {
+//             BytesOrString::Str(s) => s.as_bytes(),
+//             BytesOrString::Bytes(b) => b.as_slice(),
+//         }
+//     }
+// }
+
 
 
 #[derive(Debug)]
@@ -311,7 +313,7 @@ fn get_key_bytes(key: &Bound<'_, PyAny>, alg_name: &str, is_signing: bool, check
     if let Ok(s) = from_utf8(key_slice) {
         let s_trim = s.trim();
         if s_trim.starts_with("ssh-") || s_trim.starts_with("ecdsa-") {
-            if let Ok(pem) = crypto::ssh_to_pem(key_slice) {
+            if let Ok(pem) = crypto_parsing::ssh_to_pem(key_slice) {
                 return Ok(pem);
             }
         }
@@ -1024,7 +1026,7 @@ fn paserk_wrap(
     // 3. Public Key Sealing (Seal)
     if let Some(sk) = sealing_key {
         let sk_bytes: Vec<u8> = sk.into();
-        let stripped_sk = crypto::extract_x25519_bytes(&sk_bytes).unwrap_or(sk_bytes.clone());
+        let stripped_sk = crypto_parsing::extract_x25519_bytes(&sk_bytes).unwrap_or(sk_bytes.clone());
         return paseto::paserk_seal(&stripped_sk, key.as_bytes())
             .map_err(|e| PyValueError::new_err(format!("{}", e)));
     }
@@ -1070,7 +1072,7 @@ fn paserk_unwrap<'py>(
     // 3. Public Key Unsealing (Seal)
     if let Some(uk) = unsealing_key {
         let uk_bytes: Vec<u8> = uk.into();
-        let stripped_uk = crate::crypto::extract_x25519_bytes(&uk_bytes).unwrap_or(uk_bytes.clone());
+        let stripped_uk = crate::crypto_parsing::extract_x25519_bytes(&uk_bytes).unwrap_or(uk_bytes.clone());
         let unwrapped = paseto::paserk_unseal(&stripped_uk, paserk)
             .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
         return Ok(PyBytes::new(py, &unwrapped));
@@ -1158,6 +1160,7 @@ fn _webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     py_utils::export_py_utils(m)?;
     crypto::export_functions(m)?; 
+    crypto_parsing::export_functions(m)?;
     paseto::export_functions(m)?;
 
     add_submodule_with_sys(py, m, "api_jwk", |_py, mod_| {
