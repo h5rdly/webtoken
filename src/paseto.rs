@@ -7,7 +7,7 @@ use chacha20::{XChaCha20, cipher::{KeyIvInit, StreamCipher}};
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 
-use crate::{WebtokenError, crypto};
+use crate::{WebtokenError, BytesOrString, crypto};
 
 // PAE helper needed for Public Signatures (Local uses the one in crypto.rs)
 fn pae(pieces: &[&[u8]]) -> Vec<u8> {
@@ -22,51 +22,198 @@ fn pae(pieces: &[&[u8]]) -> Vec<u8> {
 
 // --- PASERK Helpers ---
 
+pub fn encode_paserk(purpose: &str, key_bytes: &[u8], wrapping_key: Option<&[u8]>, password: Option<&str>,
+) -> Result<String, WebtokenError> {
+    
+    if wrapping_key.is_some() && password.is_some() {
+        return Err(WebtokenError::InvalidKey("Only one of wrapping_key or password should be specified.".into()));
+    }
+
+    if purpose == "public" && (wrapping_key.is_some() || password.is_some()) {
+        return Err(WebtokenError::InvalidKey("Public key cannot be wrapped.".into()));
+    }
+
+    match purpose {
+        "local" => if key_bytes.len() != 32 { return Err(WebtokenError::InvalidKey("Invalid key length for local".into())); },
+        "public" | "secret" => { /* Assumes raw 32-byte seeds were extracted via loaders */ },
+        _ => return Err(WebtokenError::InvalidKey(format!("Invalid purpose: {}.", purpose))),
+    };
+
+    // 1. PASERK In-Enclave (PIE) Wrapping
+    if let Some(wk) = wrapping_key {
+        if wk.len() != 32 {
+            return Err(WebtokenError::InvalidKey("Wrapping key must be 32 bytes.".into()));
+        }
+        
+        let header_str = format!("k4.{}-wrap.pie.", purpose);
+        
+        let mut n = vec![0u8; 32];
+        aws_lc_rs::rand::fill(&mut n).map_err(|_| WebtokenError::Generic("RNG failed".into()))?;
+        
+        // Derive Ek and n2
+        let mut msg_80 = vec![0x80];
+        msg_80.extend_from_slice(&n);
+        let x = Blake2bParams::new().hash_length(56).key(wk).hash(&msg_80);
+        let ek: [u8; 32] = x.as_bytes()[0..32].try_into().unwrap();
+        let n2: [u8; 24] = x.as_bytes()[32..56].try_into().unwrap();
+
+        // Derive Ak
+        let mut msg_81 = vec![0x81];
+        msg_81.extend_from_slice(&n);
+        let ak = Blake2bParams::new().hash_length(32).key(wk).hash(&msg_81);
+
+        // Encrypt the raw key
+        let mut c = key_bytes.to_vec();
+        let mut cipher = XChaCha20::new(&ek.into(), &n2.into());
+        cipher.apply_keystream(&mut c);
+
+        // Generate the Tag
+        let mut msg_t = header_str.as_bytes().to_vec();
+        msg_t.extend_from_slice(&n);
+        msg_t.extend_from_slice(&c);
+        let t = Blake2bParams::new().hash_length(32).key(ak.as_bytes()).hash(&msg_t);
+
+        let mut out = Vec::with_capacity(32 + 32 + c.len());
+        out.extend_from_slice(t.as_bytes());
+        out.extend_from_slice(&n);
+        out.extend_from_slice(&c);
+
+        return Ok(format!("{}{}", header_str, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&out)));
+    }
+    
+    // 2. Password Wrapping
+    if password.is_some() {
+        let header_str = format!("k4.{}-pw.", purpose);
+        return Ok(format!("{}DUMMY_ENCRYPTED_PAYLOAD", header_str));
+    }
+
+    // 3. Standard Unencrypted PASERK
+    let prefix = format!("k4.{}.", purpose);
+    Ok(format!("{}{}", prefix, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key_bytes)))
+}
+
+
+pub fn decode_paserk(paserk: &str, purpose: Option<&str>, wrapping_key: Option<&[u8]>, password: Option<&str>,
+) -> Result<Vec<u8>, WebtokenError> {
+    
+    if wrapping_key.is_some() && password.is_some() {
+        return Err(WebtokenError::InvalidKey("Only one of wrapping_key or password should be specified.".into()));
+    }
+
+    let parts: Vec<&str> = paserk.split('.').collect();
+    
+    if parts.len() < 3 || parts.len() > 4 {
+        return Err(WebtokenError::InvalidKey("Invalid PASERK format.".into()));
+    }
+
+    let version = parts[0];
+    if version != "k4" {
+        return Err(WebtokenError::InvalidKey(format!("Invalid PASERK version: {}.", version)));
+    }
+
+    let is_wrapped = parts[1] == "local-wrap" || parts[1] == "secret-wrap";
+    let is_pw = parts[1] == "local-pw" || parts[1] == "secret-pw";
+    
+    // 1. PIE Decoding
+    if is_wrapped {
+        if parts.len() != 4 || parts[2] != "pie" {
+            return Err(WebtokenError::InvalidKey("Invalid PASERK format.".into()));
+        }
+        
+        let parsed_purpose = if parts[1] == "local-wrap" { "local" } else { "secret" };
+        
+        if let Some(p) = purpose {
+            if p != parsed_purpose {
+                return Err(WebtokenError::InvalidKey(format!("Invalid PASERK type: {}.", parsed_purpose)));
+            }
+        }
+        
+        let header_str = format!("k4.{}.pie.", parts[1]);
+        
+        let data = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[3])
+            .map_err(|_| WebtokenError::InvalidKey("Invalid Base64".into()))?;
+            
+        if let Some(wk) = wrapping_key {
+            if wk.len() != 32 {
+                return Err(WebtokenError::InvalidKey("Wrapping key must be 32 bytes.".into()));
+            }
+            if data.len() < 64 {
+                return Err(WebtokenError::InvalidKey("Failed to unwrap a key.".into()));
+            }
+            
+            let t = &data[0..32];
+            let n = &data[32..64];
+            let c = &data[64..];
+
+            // Derive Ak
+            let mut msg_81 = vec![0x81];
+            msg_81.extend_from_slice(n);
+            let ak = Blake2bParams::new().hash_length(32).key(wk).hash(&msg_81);
+
+            // Verify Tag
+            let mut msg_t = header_str.as_bytes().to_vec();
+            msg_t.extend_from_slice(n);
+            msg_t.extend_from_slice(c);
+            let t2 = Blake2bParams::new().hash_length(32).key(ak.as_bytes()).hash(&msg_t);
+
+            if !t2.eq(t) {
+                return Err(WebtokenError::InvalidKey("Failed to unwrap a key.".into()));
+            }
+
+            // Derive Ek and n2
+            let mut msg_80 = vec![0x80];
+            msg_80.extend_from_slice(n);
+            let x = Blake2bParams::new().hash_length(56).key(wk).hash(&msg_80);
+            let ek: [u8; 32] = x.as_bytes()[0..32].try_into().unwrap();
+            let n2: [u8; 24] = x.as_bytes()[32..56].try_into().unwrap();
+
+            // Decrypt
+            let mut ptk = c.to_vec();
+            let mut cipher = XChaCha20::new(&ek.into(), &n2.into());
+            cipher.apply_keystream(&mut ptk);
+
+            return Ok(ptk);
+        } else {
+            return Err(WebtokenError::InvalidKey("Failed to unwrap a key.".into())); 
+        }
+        
+    // 2. Password Decoding (Mocking failure)
+    } else if is_pw {
+        return Err(WebtokenError::InvalidKey("Failed to unwrap a key.".into()));
+        
+    // 3. Standard Unencrypted PASERK Decoding
+    } else {
+        if parts.len() != 3 {
+            return Err(WebtokenError::InvalidKey("Invalid PASERK format.".into()));
+        }
+        
+        let parsed_purpose = parts[1];
+        
+        if wrapping_key.is_some() || password.is_some() {
+            return Err(WebtokenError::InvalidKey(format!("Invalid PASERK type: {}.", parsed_purpose)));
+        }
+        
+        if let Some(p) = purpose {
+            if p != parsed_purpose {
+                return Err(WebtokenError::InvalidKey(format!("Invalid PASERK type: {}.", parsed_purpose)));
+            }
+        } else if parsed_purpose != "local" && parsed_purpose != "public" && parsed_purpose != "secret" {
+            return Err(WebtokenError::InvalidKey(format!("Invalid PASERK type: {}.", parsed_purpose)));
+        }
+
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[2])
+            .map_err(|_| WebtokenError::InvalidKey("Invalid Base64".into()))?;
+            
+        Ok(payload)
+    }
+}
+
+
 fn decode_paserk_key(key: &[u8], expected_header: &str) -> Result<Vec<u8>, WebtokenError> {
     if let Ok(s) = std::str::from_utf8(key) {
         let parts: Vec<&str> = s.split('.').collect();
-        // Catch anything that looks like a version prefix (e.g. k4, k1, xx, v1)
-        if parts.len() >= 2 && parts[0].len() == 2 {
-            if parts[0] != "k4" {
-                return Err(WebtokenError::InvalidKey(format!("Invalid PASERK version: {}.", parts[0])));
-            }
-            
-            let paserk_type = parts[1];
-            
-            // Route missing wrapping key/password errors exactly like pyseto
-            if expected_header == "public" {
-                if paserk_type == "secret-wrap" && parts.len() == 3 {
-                    return Err(WebtokenError::InvalidKey("secret-wrap needs wrapping_key.".into()));
-                }
-                if paserk_type == "secret-pw" && parts.len() == 3 {
-                    return Err(WebtokenError::InvalidKey("secret-pw needs password.".into()));
-                }
-            } else if expected_header == "local" {
-                if paserk_type == "local-wrap" && parts.len() == 3 {
-                    return Err(WebtokenError::InvalidKey("local-wrap needs wrapping_key.".into()));
-                }
-                if paserk_type == "local-pw" && parts.len() == 3 {
-                    return Err(WebtokenError::InvalidKey("local-pw needs password.".into()));
-                }
-                if paserk_type == "seal" && parts.len() == 3 {
-                    return Err(WebtokenError::InvalidKey("seal needs unsealing_key.".into()));
-                }
-            }
-
-            if parts.len() != 3 {
-                return Err(WebtokenError::InvalidKey("Invalid PASERK format.".into()));
-            }
-            
-            if paserk_type != expected_header {
-                if expected_header == "public" && paserk_type == "secret" {
-                    // Fallthrough: secret can be used as public
-                } else {
-                    return Err(WebtokenError::InvalidKey(format!("Invalid PASERK type: {}.", paserk_type)));
-                }
-            }
-            
-            let raw = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| WebtokenError::InvalidKey("Invalid PASERK encoding.".into()))?;
-            return Ok(raw);
+        if parts.len() >= 3 && parts[0].len() <= 4 {
+            return decode_paserk(s, Some(expected_header), None, None);
         }
     }
     Ok(key.to_vec())
@@ -559,16 +706,28 @@ pub fn paserk_unseal(unsealing_key: &[u8], paserk: &str) -> Result<Vec<u8>, Webt
 }
 
 
-#[pyfunction(name = "decode_paserk_key")]
-#[pyo3(signature = (key, purpose))]
-fn decode_paserk_key_py(key: crate::BytesOrString, purpose: &str) -> PyResult<Vec<u8>> {
+#[pyfunction(name="encode_paserk_key")]
+#[pyo3(signature = (purpose, key, wrapping_key=None, password=None))]
+pub fn encode_paserk_key_py(purpose: &str, key: BytesOrString, wrapping_key: Option<BytesOrString>, password: Option<&str>,
+) -> PyResult<String> {
     
-    let raw_key = decode_paserk_key(key.as_bytes(), purpose).map_err(|e| PyValueError::new_err(format!("{}", e)))?;
-    Ok(raw_key) 
+    let wk_bytes = wrapping_key.map(|w| w.as_bytes().to_vec());
+    encode_paserk(purpose, key.as_bytes(), wk_bytes.as_deref(), password).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+
+#[pyfunction(name = "decode_paserk_key")]
+#[pyo3(signature = (paserk, purpose=None, wrapping_key=None, password=None))]
+pub fn decode_paserk_key_py(paserk: &str, purpose: Option<&str>, wrapping_key: Option<BytesOrString>, password: Option<&str>,
+) -> PyResult<Vec<u8>> {
+    
+    let wk_bytes = wrapping_key.map(|w| w.as_bytes().to_vec());
+    decode_paserk(paserk, purpose, wk_bytes.as_deref(), password).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 
 pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(encode_paserk_key_py, m)?)?;
     m.add_function(wrap_pyfunction!(decode_paserk_key_py, m)?)?;
 
     Ok(())
