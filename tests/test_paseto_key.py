@@ -31,7 +31,7 @@ class TestKey:
         'purpose, key, msg',
         [
             ('xxx', random_bytes(32), 'Invalid purpose: xxx.'),
-            # ("public", "-----BEGIN BAD", "Invalid or unsupported PEM format."),
+            # ('public', '-----BEGIN BAD', 'Invalid or unsupported PEM format.'),
         ],
     )
     def test_key_new_with_invalid_arg(self, purpose, key, msg):
@@ -145,6 +145,21 @@ class TestKey:
             with pytest.raises(ValueError) as err:
                 encode_paserk_key(purpose, key, wrapping_key='xxx', password='yyy')
             assert 'Only one of wrapping_key or password should be specified.' in str(err.value)
+
+
+    @pytest.mark.parametrize(
+        'key, msg',
+        [
+            ({'x': b'xxx', 'y': b'', 'd': b'ddd'}, 'Only one of x or d should be set for v4.public.'),
+            ({'x': b'xxx', 'y': b'', 'd': b''}, 'Failed to load key'),
+            ({'x': b'', 'y': b'', 'd': b'ddd'}, 'Failed to load key'),
+            ({'x': b'', 'y': b'', 'd': b''}, 'x or d should be set for v4.public.'),
+        ],
+    )
+    def test_key_from_asymmetric_params_with_invalid_arg(self, key, msg):
+        with pytest.raises(ValueError) as err:
+            webtoken.from_asymmetric_key_params(x=key.get('x', b''), y=key.get('y', b''), d=key.get('d', b''))
+        assert msg in str(err.value)
 
 
 

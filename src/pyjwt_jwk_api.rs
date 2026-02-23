@@ -10,7 +10,7 @@ use pyo3::exceptions::{PyValueError, PyKeyError, PyTypeError};
 
 use pythonize::depythonize;
 
-use crate::{crypto, jwk, WebtokenError, PyJWTError, InvalidKeyError}; 
+use crate::{crypto, jwk, key_utils, WebtokenError, PyJWTError, InvalidKeyError}; 
 
 
 create_exception!(toke, PyJWKSetError, PyJWTError); 
@@ -231,7 +231,7 @@ impl PyJWK {
         let kty = self.key_type()?;
 
         if kty == "RSA" {
-            let comps = jwk::extract_or_recover_rsa_components(&self.inner)
+            let comps = key_utils::extract_or_recover_rsa_components(&self.inner)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
             let int_cls = py.get_type::<PyInt>();
@@ -319,7 +319,7 @@ pub fn check_rsa_key_length(key: &Bound<'_, PyAny>) -> PyResult<Option<String>> 
 
     if let Ok(jwk) = key.extract::<PyJWK>() {
         // Call the helper in jwk.rs
-        bit_len = jwk::get_rsa_bits_from_value(&jwk.inner);
+        bit_len = key_utils::get_rsa_bits_from_value(&jwk.inner);
     }
     else if let Ok(attr) = key.getattr("key_size") {
         if let Ok(val) = attr.extract::<usize>() {
@@ -332,10 +332,10 @@ pub fn check_rsa_key_length(key: &Bound<'_, PyAny>) -> PyResult<Option<String>> 
                         else { None };
 
         if let Some(kb) = key_bytes {
-             if let Ok(json_str) = jwk::pem_to_jwk(&kb) {
+             if let Ok(json_str) = key_utils::pem_to_jwk(&kb) {
                  if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
                       // Call the helper in jwk.rs
-                      bit_len = jwk::get_rsa_bits_from_value(&val);
+                      bit_len = key_utils::get_rsa_bits_from_value(&val);
                  }
              }
         }

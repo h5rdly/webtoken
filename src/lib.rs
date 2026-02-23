@@ -23,6 +23,7 @@ mod jwt;
 mod jwk;
 mod jws;
 mod jwe;
+mod key_utils;
 mod py_utils;
 mod paseto;
 pub mod pyjwt_jwk_api;
@@ -824,7 +825,7 @@ fn unsafe_peek<'py>(py: Python<'py>, token: &str) -> PyResult<Bound<'py, PyAny>>
 
 #[pyfunction]
 fn pem_to_jwk(pem: &[u8]) -> PyResult<String> {
-    crate::jwk::pem_to_jwk(pem).map_err(|e| PyValueError::new_err(e))
+    key_utils::pem_to_jwk(pem).map_err(|e| PyValueError::new_err(e))
 }
 
 
@@ -876,7 +877,7 @@ fn validate_claims(
 #[pyfunction]
 fn load_key_from_pem(key_data: BytesOrString) -> PyResult<PyJWK> {
 
-    let json_str = jwk::pem_to_jwk(&<Vec<u8>>::from(key_data)).map_err(|e| PyValueError::new_err(e))?;
+    let json_str = key_utils::pem_to_jwk(&<Vec<u8>>::from(key_data)).map_err(|e| PyValueError::new_err(e))?;
     let val: serde_json::Value = from_str(&json_str).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let alg = val.get("alg").and_then(|s| s.as_str()).map(|s| s.to_string());
 

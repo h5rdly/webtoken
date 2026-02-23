@@ -768,7 +768,22 @@ def get_default_algorithms():
 
     return default_algorithms
 
-    
+
+def from_asymmetric_key_params(x: bytes = b"", y: bytes = b"", d: bytes = b"") -> bytes:
+    """
+    For compatibility with pyseto v4 style Ed25519 coordinate loading
+    """
+
+    if x and d:
+        raise ValueError("Only one of x or d should be set for v4.public.")
+    if not x and not d:
+        raise ValueError("x or d should be set for v4.public.")
+        
+    if len((key_bytes := d or x)) != 32:
+        raise ValueError("Failed to load key")
+        
+    return key_bytes
+
 ## -- Epilogue - module wiring 
 
 sys.modules["webtoken.api_jwk"] = rust_lib.api_jwk

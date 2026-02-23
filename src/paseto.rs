@@ -7,7 +7,7 @@ use chacha20::{XChaCha20, cipher::{KeyIvInit, StreamCipher}};
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 
-use crate::{WebtokenError, BytesOrString, crypto};
+use crate::{WebtokenError, BytesOrString, crypto, jwk};
 
 // PAE helper needed for Public Signatures (Local uses the one in crypto.rs)
 fn pae(pieces: &[&[u8]]) -> Vec<u8> {
@@ -211,11 +211,23 @@ pub fn decode_paserk(paserk: &str, purpose: Option<&str>, wrapping_key: Option<&
 
 fn decode_paserk_key(key: &[u8], expected_header: &str) -> Result<Vec<u8>, WebtokenError> {
     if let Ok(s) = std::str::from_utf8(key) {
-        let parts: Vec<&str> = s.split('.').collect();
+        let s_trim = s.trim();
+        
+        // JWK support
+        if s_trim.starts_with('{') {
+            if let Ok(jwk_json) = serde_json::from_str::<serde_json::Value>(s_trim) {
+                return jwk::extract_key_bytes(&jwk_json, expected_header == "public").map_err(
+                    |e| WebtokenError::InvalidKey(format!("JWK Extraction failed: {}", e)));
+            }
+        }
+        
+        let parts: Vec<&str> = s_trim.split('.').collect();
         if parts.len() >= 3 && parts[0].len() <= 4 {
-            return decode_paserk(s, Some(expected_header), None, None);
+            return decode_paserk(s_trim, Some(expected_header), None, None);
         }
     }
+    
+    // raw bytes
     Ok(key.to_vec())
 }
 
@@ -631,6 +643,7 @@ pub fn paserk_seal(sealing_key: &[u8], target_key: &[u8]) -> Result<String, Webt
 
 
 pub fn paserk_unseal(unsealing_key: &[u8], paserk: &str) -> Result<Vec<u8>, WebtokenError> {
+
     let header = "k4.seal.";
     if !paserk.starts_with(header) { return Err(WebtokenError::InvalidToken("Invalid seal header".into())); }
     
@@ -641,7 +654,6 @@ pub fn paserk_unseal(unsealing_key: &[u8], paserk: &str) -> Result<Vec<u8>, Webt
     let epk_bytes = &data[32..64];
     let c = &data[64..];
 
-    // [NEW LOGIC]: Handle Ed25519 (64-byte) or X25519 (32-byte) secret keys
     let mut x25519_sk_bytes = [0u8; 32];
     if unsealing_key.len() == 64 {
         // Ed25519 keypair: first 32 bytes are the seed
