@@ -769,22 +769,7 @@ def get_default_algorithms():
     return default_algorithms
 
 
-def from_asymmetric_key_params(x: bytes = b"", y: bytes = b"", d: bytes = b"") -> bytes:
-    """
-    For compatibility with pyseto v4 style Ed25519 coordinate loading
-    """
-
-    if x and d:
-        raise ValueError("Only one of x or d should be set for v4.public.")
-    if not x and not d:
-        raise ValueError("x or d should be set for v4.public.")
-        
-    if len((key_bytes := d or x)) != 32:
-        raise ValueError("Failed to load key")
-        
-    return key_bytes
-
-## -- Epilogue - module wiring 
+## -- PyJWT related module wiring 
 
 sys.modules["webtoken.api_jwk"] = rust_lib.api_jwk
 
@@ -808,4 +793,166 @@ curves.SECP384R1 = SECP384R1
 curves.SECP521R1 = SECP521R1
 curves.SECP256K1 = SECP256K1
 sys.modules["webtoken.curves"] = curves
+
+
+
+## -- Pyseto support shims
+
+class NotSupportedError(Exception):
+    pass
+
+class DecryptError(Exception):
+    pass
+
+class KeyInterface:
+    pass
+
+
+class Key(KeyInterface):
+    """
+    Drop-in compatibility shim for pyseto's Key object.
+    Wraps webtoken's high-performance stateless Rust API.
+    """
+
+    def __init__(self, purpose: str, key_bytes: bytes):
+
+        self.version = 4
+        self.purpose = purpose
+        self.key_bytes = key_bytes
+
+
+    @classmethod
+    def new(cls, purpose: str, key: bytes | str | dict):
+        """Creates a Key object from raw bytes, PEMs, JWKs, or PASERKs."""
+
+        if purpose not in ("local", "public", "secret"):
+            raise ValueError(f"Invalid purpose: {purpose}.")
+
+        if purpose == "local":
+            if not isinstance(key, bytes) or len(key) != 32:
+                raise ValueError("Failed to load key.")
+            return cls(purpose, key)
+            
+        if isinstance(key, bytes) and len(key) == 32:
+            return cls(purpose, key)
+
+        actual_purpose = "public"
+        if purpose == "secret":
+            actual_purpose = "secret"
+        elif isinstance(key, dict) and "d" in key:
+            actual_purpose = "secret"
+        elif isinstance(key, str):
+            if "PRIVATE" in key or "k4.secret" in key or ('{' in key and '"d"' in key):
+                actual_purpose = "secret"
+        elif isinstance(key, bytes):
+            key_str = key.decode('utf-8', errors='ignore')
+            if "PRIVATE" in key_str or "k4.secret" in key_str or ('{' in key_str and '"d"' in key_str):
+                actual_purpose = "secret"
+
+        try:
+            key_data = json.dumps(key) if isinstance(key, dict) else key
+            key_bytes = rust_lib.decode_paserk_key(key_data, actual_purpose)
+        except ValueError as e:
+            err_str = str(e).lower()
+            if "rsa" in err_str or "ec" in err_str or "length" in err_str or "format" in err_str:
+                raise ValueError("The key is not Ed25519 key.")
+            raise ValueError("Failed to load key.")
+
+        return cls(actual_purpose, key_bytes)
+
+
+    @classmethod
+    def from_asymmetric_key_params(cls, x: bytes = b"", y: bytes = b"", d: bytes = b""):
+        """Creates a Key from raw mathematical coordinates """
+
+        if x and d:
+            raise ValueError("Only one of x or d should be set for v4.public.")
+        if not x and not d:
+            raise ValueError("x or d should be set for v4.public.")
+            
+        if len((key_bytes := d or x)) != 32:
+            raise ValueError("Failed to load key.") # <-- Added the period here!
+            
+        return cls("secret" if d else "public", key_bytes)
+
+
+    @classmethod
+    def from_paserk(cls, paserk: str, wrapping_key: bytes | None = None, password: str | None = None):
+        """Creates a Key object by decoding and unwrapping a PASERK string."""
+        try:
+            # We let Rust do the heavy lifting of parsing, validating, and decrypting (PIE/PBKW)
+            key_bytes = rust_lib.decode_paserk_key(
+                paserk, 
+                purpose=None, # Let Rust auto-detect the purpose from the string
+                wrapping_key=wrapping_key, 
+                password=password
+            )
+        except ValueError as e:
+            err_str = str(e)
+            # pyseto expects DecryptError for unwrapping failures
+            if "Failed to unwrap a key" in err_str:
+                raise DecryptError(err_str)
+            raise  # Re-raise standard ValueErrors (like "Invalid PASERK format")
+
+        # Extract the purpose directly from the string to set on the object
+        parts = paserk.split('.')
+        purpose_tag = parts[1].split('-')[0] # 'local-wrap' -> 'local'
+        purpose = "secret" if purpose_tag == "secret" else purpose_tag
+
+        return cls(4, purpose, key_bytes)
+
+
+    def to_paserk(self, wrapping_key: bytes | None = None, password: str | None = None) -> str:
+        """Exports the Key to a PASERK string, optionally wrapping/sealing it."""
+        return rust_lib.encode_paserk_key(
+            self.purpose, 
+            self.key_bytes, 
+            wrapping_key=wrapping_key, 
+            password=password
+        )
+
+    # ========================================================================
+    # CRYPTOGRAPHIC OPERATIONS (Routing to Rust)
+    # ========================================================================
+
+    def encrypt(self, payload: bytes, footer: bytes = b"", implicit_assertion: bytes = b"") -> bytes:
+        if self.purpose != "local":
+            raise NotSupportedError(f"A key for {self.purpose} does not have encrypt().")
+        token_str = rust_lib.encrypt_v4_local(payload, self.key_bytes, footer, implicit_assertion, None)
+        return token_str.encode("utf-8")
+
+
+    def decrypt(self, payload: bytes | str, implicit_assertion: bytes = b"") -> bytes:
+        if self.purpose != "local":
+            raise NotSupportedError(f"A key for {self.purpose} does not have decrypt().")
+        token_str = payload.decode("utf-8") if isinstance(payload, bytes) else payload
+        
+        try:
+            # webtoken returns (plaintext, footer). We just need plaintext for pyseto compat.
+            plaintext, _ = rust_lib.decrypt_v4_local(token_str, self.key_bytes, implicit_assertion)
+            return plaintext
+        except ValueError as e:
+            raise DecryptError(str(e))
+
+
+    def sign(self, payload: bytes, footer: bytes = b"", implicit_assertion: bytes = b"") -> bytes:
+        if self.purpose != "secret":
+            raise NotSupportedError(f"A key for {self.purpose} does not have sign().")
+        token_str = rust_lib.sign_v4_public(payload, self.key_bytes, footer, implicit_assertion)
+        return token_str.encode("utf-8")
+
+
+    def verify(self, payload: bytes | str, implicit_assertion: bytes = b"") -> bytes:
+        if self.purpose != "public" and self.purpose != "secret":
+            raise NotSupportedError(f"A key for {self.purpose} does not have verify().")
+        token_str = payload.decode("utf-8") if isinstance(payload, bytes) else payload
+        
+        try:
+            plaintext, _ = rust_lib.verify_v4_public(token_str, self.key_bytes, implicit_assertion)
+            return plaintext
+        except ValueError as e:
+            raise ValueError(f"Verification failed: {e}")
+
+    
+
 

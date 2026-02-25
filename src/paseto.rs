@@ -7,7 +7,7 @@ use chacha20::{XChaCha20, cipher::{KeyIvInit, StreamCipher}};
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 
-use crate::{WebtokenError, BytesOrString, crypto, jwk};
+use crate::{BytesOrString, WebtokenError, crypto, key_utils, jwk};
 
 // PAE helper needed for Public Signatures (Local uses the one in crypto.rs)
 fn pae(pieces: &[&[u8]]) -> Vec<u8> {
@@ -209,25 +209,38 @@ pub fn decode_paserk(paserk: &str, purpose: Option<&str>, wrapping_key: Option<&
 }
 
 
-fn decode_paserk_key(key: &[u8], expected_header: &str) -> Result<Vec<u8>, WebtokenError> {
+fn decode_paserk_key(key: &[u8], expected_header: Option<&str>) -> Result<Vec<u8>, WebtokenError> {
+
     if let Ok(s) = std::str::from_utf8(key) {
         let s_trim = s.trim();
         
-        // JWK support
+        // JWK 
         if s_trim.starts_with('{') {
             if let Ok(jwk_json) = serde_json::from_str::<serde_json::Value>(s_trim) {
-                return jwk::extract_key_bytes(&jwk_json, expected_header == "public").map_err(
+                return jwk::extract_key_bytes(&jwk_json, expected_header == Some("public")).map_err(
                     |e| WebtokenError::InvalidKey(format!("JWK Extraction failed: {}", e)));
             }
         }
+
+        // PEM
+        if s_trim.contains("-----BEGIN") {
+            if let Ok(jwk_str) = key_utils::pem_to_jwk(s_trim.as_bytes()) {
+                if let Ok(jwk_json) = serde_json::from_str::<serde_json::Value>(&jwk_str) {
+                    return jwk::extract_key_bytes(&jwk_json, expected_header == Some("public"))
+                        .map_err(|e| WebtokenError::InvalidKey(format!("PEM Extraction failed: {}", e)));
+                }
+            }
+            return Err(WebtokenError::InvalidKey("Invalid or unsupported PEM format.".into()));
+        }
         
+        // PASERK 
         let parts: Vec<&str> = s_trim.split('.').collect();
         if parts.len() >= 3 && parts[0].len() <= 4 {
-            return decode_paserk(s_trim, Some(expected_header), None, None);
+            return decode_paserk(s_trim, expected_header, None, None);
         }
     }
     
-    // raw bytes
+    // Raw bytes
     Ok(key.to_vec())
 }
 
@@ -263,7 +276,7 @@ pub fn calculate_paserk_id(key: &[u8], purpose: &str) -> Result<String, Webtoken
 pub fn encrypt_v4_local(payload: &[u8], key: &[u8], footer: Option<&[u8]>, implicit_assertion: Option<&[u8]>, 
     nonce_opt: Option<&[u8]>) -> Result<String, WebtokenError> {
     
-    let raw_key = decode_paserk_key(key, "local")?;
+    let raw_key = decode_paserk_key(key, Some("local"))?;
     if raw_key.is_empty() { 
         return Err(WebtokenError::InvalidKey("key must be specified.".into())); }
     if raw_key.len() > 64 { 
@@ -288,7 +301,7 @@ pub fn encrypt_v4_local(payload: &[u8], key: &[u8], footer: Option<&[u8]>, impli
 
 pub fn decrypt_v4_local(token: &str, key: &[u8], implicit_assertion: Option<&[u8]>) -> Result<(Vec<u8>, Vec<u8>), WebtokenError> {
 
-    let raw_key = decode_paserk_key(key, "local")?;
+    let raw_key = decode_paserk_key(key, Some("local"))?;
     let key_arr: [u8; 32] = raw_key.try_into().map_err(|_| WebtokenError::InvalidKey("Local key must be 32 bytes".into()))?;
     
     if !token.starts_with("v4.local.") {
@@ -319,7 +332,7 @@ pub fn decrypt_v4_local(token: &str, key: &[u8], implicit_assertion: Option<&[u8
 pub fn sign_v4_public(payload: &[u8], key: &[u8], footer: Option<&[u8]>, implicit_assertion: Option<&[u8]>
 ) -> Result<String, WebtokenError> {
     // [PASERK Support] Unwraps "k4.secret..."
-    let raw_key = decode_paserk_key(key, "secret")?;
+    let raw_key = decode_paserk_key(key, Some("secret"))?;
     
     let header = b"v4.public.";
     let footer_bytes = footer.unwrap_or(b"");
@@ -344,7 +357,7 @@ pub fn sign_v4_public(payload: &[u8], key: &[u8], footer: Option<&[u8]>, implici
 
 pub fn verify_v4_public(token: &str, key: &[u8], implicit_assertion: Option<&[u8]>) -> Result<(Vec<u8>, Vec<u8>), WebtokenError> {
     // [PASERK Support] Unwraps "k4.public..."
-    let raw_key = decode_paserk_key(key, "public")?;
+    let raw_key = decode_paserk_key(key, Some("public"))?;
 
     if !token.starts_with("v4.public.") {
         return Err(WebtokenError::InvalidToken("Invalid PASETO header".into()));
@@ -730,11 +743,24 @@ pub fn encode_paserk_key_py(purpose: &str, key: BytesOrString, wrapping_key: Opt
 
 #[pyfunction(name = "decode_paserk_key")]
 #[pyo3(signature = (paserk, purpose=None, wrapping_key=None, password=None))]
-pub fn decode_paserk_key_py(paserk: &str, purpose: Option<&str>, wrapping_key: Option<BytesOrString>, password: Option<&str>,
+pub fn decode_paserk_key_py(
+    paserk: &str, 
+    purpose: Option<&str>, 
+    wrapping_key: Option<BytesOrString>, 
+    password: Option<&str>,
 ) -> PyResult<Vec<u8>> {
     
     let wk_bytes = wrapping_key.map(|w| w.as_bytes().to_vec());
-    decode_paserk(paserk, purpose, wk_bytes.as_deref(), password).map_err(|e| PyValueError::new_err(e.to_string()))
+    
+    // If unwrapping parameters are provided, it MUST be a PASERK.
+    if wk_bytes.is_some() || password.is_some() {
+        return decode_paserk(paserk, purpose, wk_bytes.as_deref(), password)
+            .map_err(|e| PyValueError::new_err(e.to_string()));
+    }
+
+    // If no wrapping keys, route through the universal parser!
+    decode_paserk_key(paserk.as_bytes(), purpose)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 
