@@ -39,7 +39,7 @@ class TestKey:
 
     def test_key_from_asymmetric_params(self):
         
-        def load_jwk(key_str: str) -> dict[str, Any]:
+        def load_jwk(key_str: str) -> dict[str, bytes]:
             ''' Helper akin to the one from pyseto test suite'''
 
             jwk = webtoken.json_loads(key_str)
