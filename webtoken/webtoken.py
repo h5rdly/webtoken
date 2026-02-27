@@ -798,7 +798,43 @@ sys.modules["webtoken.curves"] = curves
 
 ## -- Pyseto support shims
 
+def paseto_encode(key, payload, purpose="local", footer=None, implicit_assertion=None, 
+    nonce=None) -> str:
+
+    if hasattr(key, "key_bytes"):
+        key_material = key.key_bytes
+        purpose = purpose or getattr(key, "purpose", "local")
+    else:
+        key_material = key
+
+    # The Key object sets purpose="secret" for private keys for compat
+    # but rust's paseto_encode match block expects "public" to trigger sign_v4_public
+    purpose = "public" if purpose == "secret" else purpose
+
+    return rust_lib.paseto_encode(key_material, payload, purpose=purpose, footer=footer, 
+        implicit_assertion=implicit_assertion, nonce=nonce)
+
+
+def paseto_decode(key, token: str, purpose="local",implicit_assertion=None):
+
+    if hasattr(key, "key_bytes"):
+        key_material = key.key_bytes
+        purpose = purpose or getattr(key, "purpose", "local")
+    else:
+        key_material = key
+
+    purpose = "public" if purpose == "secret" else purpose
+
+    try:
+        return rust_lib.paseto_decode(key_material, token, purpose=purpose, implicit_assertion=implicit_assertion)
+    except ValueError as e:
+        raise DecryptError("Failed to decrypt") if purpose == "local" else ValueError(str(e))
+
+
 class NotSupportedError(Exception):
+    pass
+
+class EncryptError(Exception):
     pass
 
 class DecryptError(Exception):
@@ -828,9 +864,16 @@ class Key(KeyInterface):
         if purpose not in ("local", "public", "secret"):
             raise ValueError(f"Invalid purpose: {purpose}.")
 
+        key = key.encode('utf8') if isinstance(key, str) else key
+
         if purpose == "local":
+            if not key:
+                raise ValueError("key must be specified.")
+            if len(key) > 64:
+                raise ValueError("key length must be up to 64 bytes.")
             if not isinstance(key, bytes) or len(key) != 32:
-                raise ValueError("Failed to load key.")
+                raise ValueError("Failed to load key")
+
             return cls(purpose, key)
             
         if isinstance(key, bytes) and len(key) == 32:
@@ -911,15 +954,19 @@ class Key(KeyInterface):
             password=password
         )
 
-    # ========================================================================
-    # CRYPTOGRAPHIC OPERATIONS (Routing to Rust)
-    # ========================================================================
 
     def encrypt(self, payload: bytes, footer: bytes = b"", implicit_assertion: bytes = b"") -> bytes:
+
         if self.purpose != "local":
             raise NotSupportedError(f"A key for {self.purpose} does not have encrypt().")
-        token_str = rust_lib.encrypt_v4_local(payload, self.key_bytes, footer, implicit_assertion, None)
-        return token_str.encode("utf-8")
+        
+        if not isinstance(payload, bytes):
+            raise EncryptError("Failed to encrypt")
+
+        try:
+            return rust_lib.encrypt_v4_local(payload, self.key_bytes, footer, implicit_assertion, None).encode("utf-8")
+        except Exception:
+            raise EncryptError("Failed to encrypt")
 
 
     def decrypt(self, payload: bytes | str, implicit_assertion: bytes = b"") -> bytes:
@@ -932,7 +979,7 @@ class Key(KeyInterface):
             plaintext, _ = rust_lib.decrypt_v4_local(token_str, self.key_bytes, implicit_assertion)
             return plaintext
         except ValueError as e:
-            raise DecryptError(str(e))
+            raise DecryptError("Failed to decrypt")
 
 
     def sign(self, payload: bytes, footer: bytes = b"", implicit_assertion: bytes = b"") -> bytes:
@@ -954,5 +1001,16 @@ class Key(KeyInterface):
             raise ValueError(f"Verification failed: {e}")
 
     
+    def to_paserk_id(self) -> str:
+        return rust_lib.paserk_id(self.key_bytes, self.purpose)
+
+
+    def to_peer_paserk_id(self) -> str:
+        """
+        Calculates the PASERK ID of the peer key.
+        For secret keys, this is the ID of the corresponding public key.
+        Local and public keys return an empty string.
+        """
+        return rust_lib.paserk_peer_id(self.key_bytes, self.purpose)
 
 

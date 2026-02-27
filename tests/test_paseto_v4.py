@@ -2,6 +2,8 @@ import sys
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
 import webtoken
+from webtoken import Key, EncryptError, DecryptError
+
 import pytest
 
 
@@ -17,24 +19,25 @@ class TestV4Local:
     def test_v4_local_new_with_invalid_arg(self, key, msg):
 
         with pytest.raises(ValueError) as err:
-            webtoken.paseto_encode(key, b'test', purpose='local')
+           Key.new("local", key)
         assert msg in str(err.value)
-
 
     def test_v4_local_decrypt_via_decode_with_wrong_key(self):
 
-        k1 = 'our-secret'.ljust(32, '\0')
-        k2 = 'others-secret'.ljust(32, '\0')
+        k1 = Key.new('local', 'our-secret'.ljust(32, '\0'))
+        k2 = Key.new('local','others-secret'.ljust(32, '\0'))
         token = webtoken.paseto_encode(k1, 'Hello world!', purpose='local')
-        with pytest.raises(ValueError) as err:
-            webtoken.paseto_decode(k2, token, purpose='local')
-        assert 'Signature verification failed' in str(err.value)
+        with pytest.raises(DecryptError) as err:
+            webtoken.paseto_decode(k2, token)
+        assert 'Failed to decrypt' in str(err.value)
 
 
     def test_v4_local_encrypt_with_invalid_arg(self):
 
-        with pytest.raises(TypeError) as err:
-            webtoken.paseto_v4_encrypt('our-secret', None, '', '')
+        key = Key.new('local','our-secret'.ljust(32, '\0'))
+        with pytest.raises(EncryptError) as err:
+            key.encrypt(None)
+        assert 'Failed to encrypt' in str(err.value)
 
 
     @pytest.mark.parametrize(
@@ -49,9 +52,9 @@ class TestV4Local:
     )
     def test_v4_local_encrypt_via_encode_with_wrong_nonce(self, nonce):
 
-        k = 'our-secret'.ljust(32, '\0')
+        key = Key.new('local','our-secret'.ljust(32, '\0'))
         with pytest.raises(ValueError) as err:
-            webtoken.paseto_encode(k, 'Hello world!', purpose='local', nonce=nonce)
+            webtoken.paseto_encode(key, 'Hello world!', purpose='local', nonce=nonce)
 
         assert 'nonce must be 32 bytes long.' in str(err.value)
 
@@ -74,33 +77,33 @@ class TestV4Local:
 
 
     def test_v4_local_to_peer_paserk_id(self):
-        assert webtoken.paserk_peer_id('our-secret', 'local') == ''
+        k = Key.new('local', 'our-secret'.ljust(32, '\0'))
+        assert k.to_peer_paserk_id() == ''
 
 
 class TestV4Public:
 
     def test_v4_public_to_paserk_id(self):
 
-        sk_raw = webtoken.extract_ed25519_private_key(private_key_ed25519)
-        pk_raw = webtoken.extract_ed25519_public_key(public_key_ed25519)
+        sk = Key.new('public', PRIVATE_KEY_ED25519)
+        pk = Key.new('public', PUBLIC_KEY_ED25519)
         
         # Secret keys export their own sid, public keys export their pid
-        assert webtoken.paserk_peer_id(sk_raw, 'secret') == webtoken.paserk_id(pk_raw, 'public')
-        assert webtoken.paserk_peer_id(pk_raw, 'public') == ''
+        assert sk.to_peer_paserk_id() == pk.to_paserk_id()
+        assert pk.to_peer_paserk_id() == ''
 
 
     def test_v4_public_verify_via_encode_with_wrong_key(self):
 
-        sk = '1' * 32
-        pk = webtoken.ed25519_public_from_seed('2' * 32)
+        sk = Key.new('public', PRIVATE_KEY_ED25519)
+        pk = Key.new('public', PUBLIC_KEY_ED25519_2)
         token = webtoken.paseto_encode(sk, 'Hello world!', purpose='public')
-        
         with pytest.raises(ValueError) as err:
             webtoken.paseto_decode(pk, token, purpose='public')
 
         assert 'Signature verification failed' in str(err.value)
 
-
+        
     @pytest.mark.parametrize(
         'paserk, msg',
         [
@@ -121,14 +124,20 @@ class TestV4Public:
 
 
 
-private_key_ed25519 = '''
+PRIVATE_KEY_ED25519 = '''
 -----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEILTL+0PfTOIQcn2VPkpxMwf6Gbt9n4UEFDjZ4RuUKjd0
 -----END PRIVATE KEY-----
 '''
 
-public_key_ed25519 = '''
+PUBLIC_KEY_ED25519 = '''
 -----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAHrnbu7wEfAP9cGBOAHHwmH4Wsot1ciXBHwBBXQ4gsaI=
+-----END PUBLIC KEY-----
+'''
+
+PUBLIC_KEY_ED25519_2 = '''
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAkv4y3wCgwetRuJUt/EKjNJzaTWMKCNcadaGg6obUFdI=
 -----END PUBLIC KEY-----
 '''

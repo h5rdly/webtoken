@@ -888,14 +888,9 @@ fn load_key_from_pem(key_data: BytesOrString) -> PyResult<PyJWK> {
 
 #[pyfunction]
 #[pyo3(signature = (key, payload, purpose="local", footer=None, implicit_assertion=None, nonce=None))]
-fn paseto_encode(
-    key: BytesOrString, 
-    payload: &Bound<'_, PyAny>,
-    purpose: &str,
-    footer: Option<&[u8]>,
-    implicit_assertion: Option<&[u8]>,
-    nonce: Option<&[u8]>
-) -> PyResult<String> {
+fn paseto_encode(key: BytesOrString, payload: &Bound<'_, PyAny>, purpose: &str, footer: Option<&[u8]>,
+    implicit_assertion: Option<&[u8]>, nonce: Option<&[u8]>) -> PyResult<String> {
+
     let payload_bytes: Vec<u8> = if let Ok(py_bytes) = payload.cast::<pyo3::types::PyBytes>() {
         py_bytes.as_bytes().to_vec()
     } else {
@@ -906,13 +901,8 @@ fn paseto_encode(
 
     match purpose {
         "local" => {
-            paseto::encrypt_v4_local(
-                &payload_bytes, 
-                key.as_bytes(), 
-                footer, 
-                implicit_assertion, 
-                nonce
-            ).map_err(|e| PyValueError::new_err(format!("{}", e)))
+            paseto::encrypt_v4_local(&payload_bytes, key.as_bytes(), footer, implicit_assertion, nonce)
+                .map_err(|e| PyValueError::new_err(format!("{}", e)))
         },
         "public" => {
             paseto::sign_v4_public(&payload_bytes, key.as_bytes(), footer, implicit_assertion)
@@ -925,12 +915,7 @@ fn paseto_encode(
 
 #[pyfunction]
 #[pyo3(signature = (key, token, purpose="local", implicit_assertion=None))]
-fn paseto_decode<'py>(
-    py: Python<'py>,
-    key: BytesOrString,
-    token: &str,
-    purpose: &str,
-    implicit_assertion: Option<&[u8]>
+fn paseto_decode<'py>(py: Python<'py>, key: BytesOrString, token: &str, purpose: &str, implicit_assertion: Option<&[u8]>
 ) -> PyResult<Bound<'py, PyAny>> {
 
     let (payload_bytes, _footer) = match purpose {
@@ -992,16 +977,10 @@ fn paserk_peer_id(key: BytesOrString, purpose: &str) -> PyResult<String> {
 
 #[pyfunction]
 #[pyo3(signature = (key, purpose, wrapping_key=None, password=None, sealing_key=None, options=None))]
-fn paserk_wrap(
-    key: BytesOrString, 
-    purpose: &str,
-    wrapping_key: Option<BytesOrString>,
-    password: Option<BytesOrString>,
-    sealing_key: Option<BytesOrString>,
-    options: Option<&Bound<'_, PyDict>>
-) -> PyResult<String> {
+fn paserk_wrap(key: BytesOrString, purpose: &str, wrapping_key: Option<BytesOrString>, password: Option<BytesOrString>,
+    sealing_key: Option<BytesOrString>, options: Option<&Bound<'_, PyDict>>) -> PyResult<String> {
     
-    // 1. Password-Based Key Wrapping (PBKW)
+    // Password-Based Key Wrapping (PBKW)
     if let Some(pw) = password {
         let pw_bytes: Vec<u8> = pw.into();
         let mut memlimit = 67108864; // Default 64 MiB
@@ -1017,14 +996,14 @@ fn paserk_wrap(
             .map_err(|e| PyValueError::new_err(format!("{}", e)));
     }
     
-    // 2. Platform-Independent Encryption (PIE)
+    // Platform-Independent Encryption (PIE)
     if let Some(wk) = wrapping_key {
         let wk_bytes: Vec<u8> = wk.into();
         return paseto::paserk_wrap_pie(&wk_bytes, key.as_bytes(), purpose)
             .map_err(|e| PyValueError::new_err(format!("{}", e)));
     }
 
-    // 3. Public Key Sealing (Seal)
+    // Public Key Sealing (Seal)
     if let Some(sk) = sealing_key {
         let sk_bytes: Vec<u8> = sk.into();
         let stripped_sk = crypto_parsing::extract_x25519_bytes(&sk_bytes).unwrap_or(sk_bytes.clone());
@@ -1032,7 +1011,7 @@ fn paserk_wrap(
             .map_err(|e| PyValueError::new_err(format!("{}", e)));
     }
 
-    // 4. Basic Serialization
+    // Basic Serialization
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     let b64_key = URL_SAFE_NO_PAD.encode(key.as_bytes());
     match purpose {
@@ -1046,15 +1025,10 @@ fn paserk_wrap(
 
 #[pyfunction]
 #[pyo3(signature = (paserk, wrapping_key=None, password=None, unsealing_key=None))]
-fn paserk_unwrap<'py>(
-    py: Python<'py>,
-    paserk: &str,
-    wrapping_key: Option<BytesOrString>,
-    password: Option<BytesOrString>,
-    unsealing_key: Option<BytesOrString>,
-) -> PyResult<Bound<'py, PyBytes>> {
+fn paserk_unwrap<'py>(py: Python<'py>, paserk: &str, wrapping_key: Option<BytesOrString>, password: Option<BytesOrString>,
+    unsealing_key: Option<BytesOrString>,) -> PyResult<Bound<'py, PyBytes>> {
 
-    // 1. Password-Based Key Unwrapping (PBKW)
+    // Password-Based Key Unwrapping (PBKW)
     if let Some(pw) = password {
         let pw_bytes: Vec<u8> = pw.into();
         let unwrapped = paseto::paserk_unwrap_pbkw(&pw_bytes, paserk)
@@ -1062,7 +1036,7 @@ fn paserk_unwrap<'py>(
         return Ok(PyBytes::new(py, &unwrapped));
     }
 
-    // 2. Platform-Independent Decryption (PIE)
+    // Platform-Independent Decryption (PIE)
     if let Some(wk) = wrapping_key {
         let wk_bytes: Vec<u8> = wk.into();
         let unwrapped = paseto::paserk_unwrap_pie(&wk_bytes, paserk)
@@ -1070,7 +1044,7 @@ fn paserk_unwrap<'py>(
         return Ok(PyBytes::new(py, &unwrapped));
     }
 
-    // 3. Public Key Unsealing (Seal)
+    // Public Key Unsealing (Seal)
     if let Some(uk) = unsealing_key {
         let uk_bytes: Vec<u8> = uk.into();
         let stripped_uk = crate::crypto_parsing::extract_x25519_bytes(&uk_bytes).unwrap_or(uk_bytes.clone());
@@ -1079,7 +1053,7 @@ fn paserk_unwrap<'py>(
         return Ok(PyBytes::new(py, &unwrapped));
     }
 
-    // 4. Basic Deserialization
+    // Basic Deserialization
     let parts: Vec<&str> = paserk.split('.').collect();
     if parts.len() < 3 || parts[0] != "k4" {
         return Err(PyValueError::new_err("Invalid PASERK basic format"));

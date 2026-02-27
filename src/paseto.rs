@@ -273,6 +273,8 @@ pub fn calculate_paserk_id(key: &[u8], purpose: &str) -> Result<String, Webtoken
 //  v4 Local (Symmetric)
 // ============================================================================
 
+#[pyfunction]
+#[pyo3(signature = (payload, key, footer=None, implicit_assertion=None, nonce_opt=None))]
 pub fn encrypt_v4_local(payload: &[u8], key: &[u8], footer: Option<&[u8]>, implicit_assertion: Option<&[u8]>, 
     nonce_opt: Option<&[u8]>) -> Result<String, WebtokenError> {
     
@@ -744,7 +746,7 @@ pub fn encode_paserk_key_py(purpose: &str, key: BytesOrString, wrapping_key: Opt
 #[pyfunction(name = "decode_paserk_key")]
 #[pyo3(signature = (paserk, purpose=None, wrapping_key=None, password=None))]
 pub fn decode_paserk_key_py(
-    paserk: &str, 
+    paserk: BytesOrString, 
     purpose: Option<&str>, 
     wrapping_key: Option<BytesOrString>, 
     password: Option<&str>,
@@ -754,7 +756,7 @@ pub fn decode_paserk_key_py(
     
     // If unwrapping parameters are provided, it MUST be a PASERK.
     if wk_bytes.is_some() || password.is_some() {
-        return decode_paserk(paserk, purpose, wk_bytes.as_deref(), password)
+        return decode_paserk(std::str::from_utf8(paserk.as_bytes()).unwrap(), purpose, wk_bytes.as_deref(), password)
             .map_err(|e| PyValueError::new_err(e.to_string()));
     }
 
@@ -767,6 +769,7 @@ pub fn decode_paserk_key_py(
 pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(encode_paserk_key_py, m)?)?;
     m.add_function(wrap_pyfunction!(decode_paserk_key_py, m)?)?;
+    m.add_function(wrap_pyfunction!(encrypt_v4_local, m)?)?;
 
     Ok(())
 }
