@@ -964,12 +964,7 @@ pub fn generate_pkce_pair() -> PyResult<(String, String)> {
 
 #[pyfunction]
 #[pyo3(signature = (password, salt, iterations, length=32))]
-fn pbkdf2_hmac_sha256<'py>(
-    py: Python<'py>,
-    password: &[u8],
-    salt: &[u8],
-    iterations: u32,
-    length: usize,
+fn pbkdf2_hmac_sha256<'py>(py: Python<'py>, password: &[u8], salt: &[u8], iterations: u32, length: usize,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let mut out = vec![0u8; length];
     pbkdf2_manual_sha256(password, salt, iterations, &mut out);
@@ -1090,6 +1085,25 @@ fn paseto_v4_decrypt_py<'py>(py: Python<'py>, key: &[u8], body: &[u8], footer: O
 }
 
 
+#[pyfunction]
+#[pyo3(signature = (seed))]
+pub fn ed25519_seed_to_x25519_private(seed: &[u8]) -> PyResult<Vec<u8>> {
+
+    if seed.len() != 32 {
+        return Err(PyValueError::new_err("Ed25519 seed must be exactly 32 bytes"));
+    }
+    
+    let digest = Sha512::hash(seed);
+    let mut x25519_priv = digest.as_ref()[0..32].to_vec();
+    
+    // Curve25519 clamping
+    x25519_priv[0] &= 248;
+    x25519_priv[31] &= 127;
+    x25519_priv[31] |= 64;
+    
+    Ok(x25519_priv)
+}
+
 
 pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(digest, m)?)?;
@@ -1106,6 +1120,7 @@ pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sign_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_py, m)?)?;
     m.add_function(wrap_pyfunction!(ed25519_public_from_seed_py, m)?)?;
+    m.add_function(wrap_pyfunction!(ed25519_seed_to_x25519_private, m)?)?;
     m.add_function(wrap_pyfunction!(x25519_public_from_private_py, m)?)?;
     m.add_function(wrap_pyfunction!(x25519_derive_py, m)?)?;
     m.add_function(wrap_pyfunction!(paseto_v4_encrypt_py, m)?)?;

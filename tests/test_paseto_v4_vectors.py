@@ -81,6 +81,444 @@ class TestWithTestVectorsV4:
             pytest.fail(f"Invalid test name: {v['name']}")
 
 
+    def test_with_test_vectors_paserk_public(self):
+
+        for v in webtoken.json_loads(K4_PUBLIC)['tests']:
+            k = Key.from_asymmetric_key_params(x=bytes.fromhex(v["key"]))
+            assert k.to_paserk() == v["paserk"]
+            k2 = Key.from_paserk(v["paserk"])
+            assert k2.to_paserk() == v["paserk"]
+
+
+    def test_with_test_vectors_paserk_secret(self):
+
+        for v in webtoken.json_loads(K4_SECRET)['tests']:
+            k = Key.from_asymmetric_key_params(d=bytes.fromhex(v["secret-key-seed"]))
+            assert k.to_paserk() == v["paserk"]
+            k2 = Key.from_paserk(v["paserk"])
+            assert k2.to_paserk() == v["paserk"]
+
+
+    def test_with_test_vectors_paserk_local(self):
+
+        for v in webtoken.json_loads(K4_LOCAL)['tests']:
+            k = Key.new("local", bytes.fromhex(v["key"]))
+            k2 = Key.from_paserk(v["paserk"])
+            assert k.to_paserk() == v["paserk"]
+            assert k2.to_paserk() == v["paserk"]
+
+
+    def test_with_test_vectors_paserk_pid(self):
+
+        for v in webtoken.json_loads(K4_PID)['tests']:
+            k = Key.from_asymmetric_key_params(x=bytes.fromhex(v["key"]))
+            assert k.to_paserk_id() == v["paserk"]
+
+
+    def test_with_test_vectors_paserk_sid(self):
+
+        for v in webtoken.json_loads(K4_SID)['tests']:
+            k = Key.from_asymmetric_key_params(d=bytes.fromhex(v["seed"]))
+            assert k.to_paserk_id() == v["paserk"]
+
+
+    def test_with_test_vectors_paserk_lid(self):
+
+        for v in webtoken.json_loads(K4_LID)['tests']:
+            k = Key.new("local", bytes.fromhex(v["key"]))
+            assert k.to_paserk_id() == v["paserk"]
+
+
+    def test_with_test_vectors_paserk_local_wrap_pie(self):
+
+        for v in webtoken.json_loads(K4_LOCAL_WRAP_PIE)['tests']:
+            k = Key.from_paserk(v["paserk"], wrapping_key=bytes.fromhex(v["wrapping-key"]))
+
+            k1 = Key.new("local", bytes.fromhex(v["unwrapped"]))
+            wpk = k1.to_paserk(wrapping_key=bytes.fromhex(v["wrapping-key"]))
+            k2 = Key.from_paserk(wpk, wrapping_key=bytes.fromhex(v["wrapping-key"]))
+
+            t = webtoken.paseto_encode(k, b"Hello world!")
+            d = webtoken.paseto_decode(k, t)
+            d1 = webtoken.paseto_decode(k1, t)
+            d2 = webtoken.paseto_decode(k2, t)
+            assert d == d1 == d2 == b"Hello world!"
+
+            t = webtoken.paseto_encode(k1, b"Hello world!")
+            d1 = webtoken.paseto_decode(k1, t)
+            d2 = webtoken.paseto_decode(k2, t)
+            assert d1 == d2 == b"Hello world!"
+
+            d = webtoken.paseto_decode(k, t)
+            assert d == b"Hello world!"
+
+
+    def test_with_test_vectors_paserk_secret_wrap_pie(self):
+        
+        for v in webtoken.json_loads(K4_SECRET_WRAP_PIE)['tests']:
+            k = Key.from_paserk(v["paserk"], wrapping_key=bytes.fromhex(v["wrapping-key"]))
+            k1 = Key.from_asymmetric_key_params(d=bytes.fromhex(v["unwrapped"])[0:32])
+
+            wpk = k1.to_paserk(wrapping_key=bytes.fromhex(v["wrapping-key"]))
+            k2 = Key.from_paserk(wpk, wrapping_key=bytes.fromhex(v["wrapping-key"]))
+
+            t = webtoken.paseto_encode(k, b"Hello world!")
+            d = webtoken.paseto_decode(k, t)
+            d1 = webtoken.paseto_decode(k1, t)
+            d2 = webtoken.paseto_decode(k2, t)
+            assert d == d1 == d2 == b"Hello world!"
+
+            t = webtoken.paseto_encode(k1, b"Hello world!")
+            d1 = webtoken.paseto_decode(k1, t)
+            d2 = webtoken.paseto_decode(k2, t)
+            assert d1 == d2 == b"Hello world!"
+
+            d = webtoken.paseto_decode(k, t)
+            assert d == b"Hello world!"
+
+
+    def test_with_test_vectors_paserk_local_pw(self):
+
+        for v in webtoken.json_loads(K4_LOCAL_PW)['tests']:
+            password = v["password"]
+            k = Key.from_paserk(v["paserk"], password=password)
+
+            k1 = Key.new("local", bytes.fromhex(v["unwrapped"]))
+            wpk = k1.to_paserk(password=password,)
+
+            k2 = Key.from_paserk(wpk, password=password)
+            assert k1.key_bytes == k2.key_bytes
+
+            t = webtoken.paseto_encode(k, b"Hello world!")
+            d = webtoken.paseto_decode(k, t)
+            d1 = webtoken.paseto_decode(k1, t)
+            d2 = webtoken.paseto_decode(k2, t)
+            assert d == d1 == d2 == b"Hello world!"
+
+            t = webtoken.paseto_encode(k1, b"Hello world!")
+            d1 = webtoken.paseto_decode(k1, t)
+            d2 = webtoken.paseto_decode(k2, t)
+            assert d1 == d2 == b"Hello world!"
+
+            d = webtoken.paseto_decode(k, t)
+            assert d == b"Hello world!"
+
+
+    def test_with_test_vectors_paserk_secret_pw(self):
+
+        for v in webtoken.json_loads(K4_SECRET_PW)['tests']:
+            k = Key.from_paserk(v["paserk"], password=v["password"])
+            k1 = Key.from_asymmetric_key_params(d=bytes.fromhex(v["unwrapped"])[0:32])
+            wpk = k1.to_paserk(password=v["password"])
+
+            k2 = Key.from_paserk(wpk, password=v["password"])
+
+            t = webtoken.paseto_encode(k, b"Hello world!")
+            d = webtoken.paseto_decode(k, t)
+            d1 = webtoken.paseto_decode(k1, t)
+            d2 = webtoken.paseto_decode(k2, t)
+            assert d == d1 == d2 == b"Hello world!"
+
+            t = webtoken.paseto_encode(k1, b"Hello world!")
+            d1 = webtoken.paseto_decode(k1, t)
+            d2 = webtoken.paseto_decode(k2, t)
+            assert d1 == d2 == b"Hello world!"
+
+            d = webtoken.paseto_decode(k, t)
+            assert d == b"Hello world!"
+
+
+    def test_with_test_vectors_paserk_seal_v4(self):
+
+        for v in webtoken.json_loads(K4_SEAL)['tests']:
+            sk_ed25519 = bytes.fromhex(v["sealing-secret-key"])[0:32]
+            unsealing_key = webtoken.ed25519_seed_to_x25519_private(sk_ed25519)
+            sealing_key = webtoken.x25519_public_from_private(unsealing_key)
+            
+            k = Key.from_paserk(v["paserk"], unsealing_key=unsealing_key)
+            k1 = Key.new("local", bytes.fromhex(v["unsealed"]))
+            wpk = k1.to_paserk(sealing_key=sealing_key)
+            k2 = Key.from_paserk(wpk, unsealing_key=unsealing_key)
+            assert k1.key_bytes == k2.key_bytes
+
+            t = webtoken.paseto_encode(k, b"Hello world!")
+            d = webtoken.paseto_decode(k, t)
+            d1 = webtoken.paseto_decode(k1, t)
+            d2 = webtoken.paseto_decode(k2, t)
+            assert d == d1 == d2 == b"Hello world!"
+
+            t = webtoken.paseto_encode(k1, b"Hello world!")
+            d1 = webtoken.paseto_decode(k1, t)
+            d2 = webtoken.paseto_decode(k2, t)
+            assert d1 == d2 == b"Hello world!"
+
+            d = webtoken.paseto_decode(k, t)
+            assert d == b"Hello world!"
+
+
+
+# -- Test Vectors
+
+K4_SECRET_PW = '''
+{
+  "name": "PASERK k4.secret-pw Test Vectors",
+  "tests": [
+    {
+      "name": "k4.secret-pw-1",
+      "unwrapped": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f1ce56a48c82ff99162a14bc544612674e5d61fb9317e65d4055780fdbcb4dc35",
+      "password": "correct horse battery staple",
+      "options": {"memlimit": 67108864, "opslimit": 2},
+      "paserk": "k4.secret-pw.Stkwnh1lHUA7p3t2GDRxdQAAAAAEAAAAAAAAAgAAAAEUtfYRjsLAnE5hGX0Ni8H_W2XdVz5laZ9MdByIYgnDQnXEEx7NyXzBHhKdNVa12XhSLNTNMLuSo5kDMsJUHlEMt8yIE-F7GMDvBXTFvNFniK1Ao0TreYqIYTSKfIvfcZhwiWuHqFGddVhOvTrNt8zi53IeF-g089U"
+    },
+    {
+      "name": "k4.secret-pw-2",
+      "unwrapped": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f1ce56a48c82ff99162a14bc544612674e5d61fb9317e65d4055780fdbcb4dc35",
+      "password": "correct horse battery staple",
+      "options": {"memlimit": 268435456, "opslimit": 3},
+      "paserk": "k4.secret-pw.8SqqKhga2erPtJdHMtSD3QAAAAAQAAAAAAAAAwAAAAFgsqMCqzX86kHsjfVlP05h7FBHA-438QAYiiTY4IhpGLDnZLmxLrB4A6P_cC_o2zZR_kxzf5NgsmrsAe-FgrI4e0zd2FhVC3G9d6huc8aKqe-wcUSTLpQsCFTnkuVHM2_sIXQaPoKQl14g-ZjmGEMjtVXiDX6Tb2k"
+    }
+  ]
+}
+'''
+
+K4_SEAL = '''
+{
+  "name": "PASERK k4.seal Test Vectors",
+  "tests": [
+    {
+      "name": "k4.seal-1",
+      "sealing-secret-key": "407796f4bc4b8184e9fe0c54b336822d34823092ad873d87ba14c3efb9db8c1db7715bd661458d928654d3e832f53ff5c9480542e0e3d4c9b032c768c7ce6023",
+      "sealing-public-key": "b7715bd661458d928654d3e832f53ff5c9480542e0e3d4c9b032c768c7ce6023",
+      "unsealed": "0000000000000000000000000000000000000000000000000000000000000000",
+      "paserk": "k4.seal.OPFn-AEUsKUWtAUZrutVvd9YaZ4CmV4_lk6ii8N72l5gTnl8RlL_zRFqWTZZV9gSnPzARQ_QklrZ2Qs6cJGKOENNOnsDXL5haXcr-QbTXgoLVBvT4ruJ8MdjWXGRTVc9"
+    },
+    {
+      "name": "k4.seal-2",
+      "sealing-secret-key": "a770cf90f55d8a6dec51190eb640cb25ce31f7e5eb87a00ca9859022e6da9518a0fbc3dc2f99a538b40fb7616a83cf4276b6cf223fff5a2c2d3236235eb87dc7",
+      "sealing-public-key": "a0fbc3dc2f99a538b40fb7616a83cf4276b6cf223fff5a2c2d3236235eb87dc7",
+      "unsealed": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "paserk": "k4.seal.3-VOL4pX5b7eV3uMhYHfOhJNN77YyYtd7wYXrH9rRucKNmq0aO-6AWIFU4xOXUCBk0mzBZeWAPAKrvejqixqeRXm-MQXt8yFGHmM1RzpdJw80nabbyDIsNCpBwltU-uj"
+    }
+  ]
+}
+'''
+
+K4_LOCAL_PW = '''
+{
+  "name": "PASERK k4.local-pw Test Vectors",
+  "tests": [
+    {
+      "name": "k4.local-pw-1",
+      "unwrapped": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "password": "correct horse battery staple",
+      "options": {"memlimit": 67108864, "opslimit": 2},
+      "paserk": "k4.local-pw.-0q-gj9oN18gifSrvpClFwAAAAAEAAAAAAAAAgAAAAH1hyLMFQGs5F1aZoysb7bRtc91SYXu2-bi-mmISIF5cs-SQHp1MoppBFc9I1LTkZA4KsVR_ipH3XdGLj3Pe77qCE64HI1cPG1LNDF0vINnGOrLEaE1Clfi"
+    },
+    {
+      "name": "k4.local-pw-2",
+      "unwrapped": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "password": "correct horse battery staple",
+      "options": {"memlimit": 268435456, "opslimit": 3},
+      "paserk": "k4.local-pw.3oPc6UhC5SCQjL0sCCeTgQAAAAAQAAAAAAAAAwAAAAHimvu_i1YAd7f8VZSilxXd4gXM-sefO6VyEV7qmuDJXx3xuMcg45tjWQit-wOugj-Q-CzhMGYEFNImI2s0gMA8SZE0d_-HbmRM6MsC0XqzlxWpSI8rTyO-"
+    }
+  ]
+}
+'''
+
+
+K4_SECRET_WRAP_PIE = '''
+{
+  "name": "PASERK k4.secret-wrap.pie Test Vectors",
+  "tests": [
+    {
+      "name": "k4.secret-wrap.pie-1",
+      "unwrapped": "00000000000000000000000000000000000000000000000000000000000000003b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+      "wrapping-key":"707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "paserk": "k4.secret-wrap.pie.NC6xj8t0VuK-0KE7Fy6PAKtbQwEFRyQMe39A0ctrkaIcS1zjVgvYTN6cu1AZM7bU2bz-jzKclAWu3Bln6xhSOsUqcQPi6Kw_LtKXLRCeggiuPnaqWfIT4qacjXtXhFvOvDPye21fbWOPuoNM9VppuTzN0LzYDYgNYCPsbWt2n4c"
+    },
+    {
+      "name": "k4.secret-wrap.pie-2",
+      "unwrapped": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f1ce56a48c82ff99162a14bc544612674e5d61fb9317e65d4055780fdbcb4dc35",
+      "wrapping-key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "paserk": "k4.secret-wrap.pie.dYA31PP6a-d1Cyk3xt2Dz8kpGSlbpwkG5UyrLcgRspSvq1RUO1UQicQNE3-eXYUYGhXrG9zAVnR93tize-IPtiFEyO70U3bWEXd0uU7asDJQ19I3V2mf5OPIcKQl-TnY0XXtw5DPqY1yEFEbA9WTiDG0I3z6KTWA2z09NWm0OHQ"
+    }
+  ]
+}
+'''
+
+
+K4_LOCAL_WRAP_PIE = '''
+{
+  "name": "PASERK k4.local-wrap.pie Test Vectors",
+  "tests": [
+    {
+      "name": "k4.local-wrap.pie-1",
+      "unwrapped": "0000000000000000000000000000000000000000000000000000000000000000",
+      "wrapping-key":"707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "paserk": "k4.local-wrap.pie.y-PC8Zh6P1DoOBUdhRr7W8GWSgHtRKvE8PWWYA-qXy3fxJDmaRsxcZVQzuvXHZuBg5MqCgh_y5K0WbukJCrDX73Wdf631VBnE1DNHafbjnGNzFNWP59ba9ifsOAgE7Bw"
+    },
+    {
+      "name": "k4.local-wrap.pie-2",
+      "unwrapped": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "wrapping-key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "paserk": "k4.local-wrap.pie.cy-Mu6zSfhu6q0_XdAM9p1zre_joUWjreSjHgisVNh-oHaNarN4_c7xuSyaHwqEDxF7lTbfNplBGU7wTeUyt__hZyj1J38NdNxVwuXamJY2QhRE-kWYA9_16xTsGwCQX"
+    }
+  ]
+}
+'''
+
+K4_LID = '''
+{
+  "name": "PASERK k4.lid Test Vectors",
+  "tests": [
+    {
+      "name": "k4.lid-1",
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "paserk": "k4.lid.bqltbNc4JLUAmc9Xtpok-fBuI0dQN5_m3CD9W_nbh559"
+    },
+    {
+      "name": "k4.lid-2",
+      "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "paserk": "k4.lid.iVtYQDjr5gEijCSjJC3fQaJm7nCeQSeaty0Jixy8dbsk"
+    },
+    {
+      "name": "k4.lid-3",
+      "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e90",
+      "paserk": "k4.lid.-v0wjDR1FVxNT2to41Ay1P4_8X6HIxnybX1nZ1a4FCTm"
+    }
+  ]
+}
+'''
+
+K4_SID = '''
+{
+  "name": "PASERK k4.sid Test Vectors",
+  "tests": [
+    {
+      "name": "k4.sid-1",
+      "key": "00000000000000000000000000000000000000000000000000000000000000003b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+      "seed": "0000000000000000000000000000000000000000000000000000000000000000",
+      "paserk": "k4.sid.YujQ-NvcGquQ0Q-arRf8iYEcXiSOKg2Vk5az-n1lxiUd"
+    },
+    {
+      "name": "k4.sid-2",
+      "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f1ce56a48c82ff99162a14bc544612674e5d61fb9317e65d4055780fdbcb4dc35",
+      "seed": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "paserk": "k4.sid.gHYyx8y5YzqKEZeYoMDqUOKejdSnY_AWhYZiSCMjR1V5"
+    },
+    {
+      "name": "k4.sid-3",
+      "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e9060fe37571a5d6e7d30b15154ce4a9fb92c70c870848f4ccdf1626588097f73f7",
+      "seed": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e90",
+      "paserk": "k4.sid.2_m4h6ZTO3qm_PIpl-eYyAqTbNTgmIPQ85POmUEyZHNd"
+    }
+  ]
+}
+'''
+
+
+K4_PID = '''
+{
+  "name": "PASERK k4.pid Test Vectors",
+  "tests": [
+    {
+      "name": "k4.pid-1",
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "paserk": "k4.pid.S_XQmeEwHbbvRmiyfXfHYpLGjXGzjTRSDoT1YtTakWFE"
+    },
+    {
+      "name": "k4.pid-2",
+      "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "paserk": "k4.pid.9ShR3xc8-qVJ_di0tc9nx0IDIqbatdeM2mqLFBJsKRHs"
+    },
+    {
+      "name": "k4.pid-3",
+      "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e90",
+      "paserk": "k4.pid.-nyvbaTz8U6TQz7OZWW-iB3va31iAxIpUgzUcVQVmW9A"
+    }
+  ]
+}
+'''
+
+
+K4_LOCAL = '''
+{
+  "name": "PASERK k4.local Test Vectors",
+  "tests": [
+    {
+      "name": "k4.local-1",
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "paserk": "k4.local.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "k4.local-2",
+      "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "paserk": "k4.local.cHFyc3R1dnd4eXp7fH1-f4CBgoOEhYaHiImKi4yNjo8"
+    },
+    {
+      "name": "k4.local-3",
+      "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e90",
+      "paserk": "k4.local.cHFyc3R1dnd4eXp7fH1-f4CBgoOEhYaHiImKi4yNjpA"
+    }
+  ]
+}
+'''
+
+K4_SECRET = '''
+{
+  "name": "PASERK k4.secret Test Vectors",
+  "tests": [
+    {
+      "name": "k4.secret-1",
+      "key": "00000000000000000000000000000000000000000000000000000000000000003b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+      "secret-key-seed": "0000000000000000000000000000000000000000000000000000000000000000",
+      "public-key": "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+      "paserk": "k4.secret.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA7aie8zrakLWKjqNAqbw1zZTIVdx3iQ6Y6wEihi1naKQ"
+    },
+    {
+      "name": "k4.secret-2",
+      "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f1ce56a48c82ff99162a14bc544612674e5d61fb9317e65d4055780fdbcb4dc35",
+      "secret-key-seed": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "public-key": "1ce56a48c82ff99162a14bc544612674e5d61fb9317e65d4055780fdbcb4dc35",
+      "paserk": "k4.secret.cHFyc3R1dnd4eXp7fH1-f4CBgoOEhYaHiImKi4yNjo8c5WpIyC_5kWKhS8VEYSZ05dYfuTF-ZdQFV4D9vLTcNQ"
+    },
+    {
+      "name": "k4.secret-3",
+      "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e9060fe37571a5d6e7d30b15154ce4a9fb92c70c870848f4ccdf1626588097f73f7",
+      "secret-key-seed": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e90",
+      "public-key": "60fe37571a5d6e7d30b15154ce4a9fb92c70c870848f4ccdf1626588097f73f7",
+      "paserk": "k4.secret.cHFyc3R1dnd4eXp7fH1-f4CBgoOEhYaHiImKi4yNjpBg_jdXGl1ufTCxUVTOSp-5LHDIcISPTM3xYmWICX9z9w"
+    }
+  ]
+}
+'''
+
+
+K4_PUBLIC = '''
+{
+  "name": "PASERK k4.public Test Vectors",
+  "tests": [
+    {
+      "name": "k4.public-1",
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "paserk": "k4.public.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "k4.public-2",
+      "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "paserk": "k4.public.cHFyc3R1dnd4eXp7fH1-f4CBgoOEhYaHiImKi4yNjo8"
+    },
+    {
+      "name": "k4.public-3",
+      "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e90",
+      "paserk": "k4.public.cHFyc3R1dnd4eXp7fH1-f4CBgoOEhYaHiImKi4yNjpA"
+    }
+  ]
+}
+'''
+
+
+
 V4 = '''
 {
   "name": "PASETO v4 Test Vectors",

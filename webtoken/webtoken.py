@@ -798,7 +798,7 @@ sys.modules['webtoken.curves'] = curves
 
 ## -- Pyseto support shims
 
-def paseto_encode(key: bytes | str, payload: str, purpose: str='local', footer=None, implicit_assertion=None, 
+def paseto_encode(key: bytes | str, payload: str, purpose: str | None=None, footer=None, implicit_assertion=None, 
     nonce=None) -> str:
 
     if hasattr(key, 'key_bytes'):
@@ -806,6 +806,9 @@ def paseto_encode(key: bytes | str, payload: str, purpose: str='local', footer=N
         purpose = purpose or getattr(key, 'purpose', 'local')
     else:
         key_material = key
+
+    if purpose == "secret" and isinstance(key_material, bytes) and len(key_material) == 64:
+        key_material = key_material[:32]
 
     # The Key object sets purpose='secret' for private keys for compat
     # but rust's paseto_encode match block expects 'public' to trigger sign_v4_public
@@ -815,7 +818,7 @@ def paseto_encode(key: bytes | str, payload: str, purpose: str='local', footer=N
         implicit_assertion=implicit_assertion, nonce=nonce)
 
 
-def paseto_decode(key: bytes | str, token: bytes | str, purpose: str='local', implicit_assertion=None):
+def paseto_decode(key: bytes | str, token: bytes | str, purpose: str | None=None, implicit_assertion=None):
 
     if hasattr(key, 'key_bytes'):
         key_material = key.key_bytes
@@ -823,10 +826,20 @@ def paseto_decode(key: bytes | str, token: bytes | str, purpose: str='local', im
     else:
         key_material = key
 
-    purpose = 'public' if purpose == 'secret' else purpose
+    # If the user passed a secret key to decode, we provide the public half
+    if purpose == "secret" and isinstance(key_material, bytes):
+        if len(key_material) == 64:
+            # PASERK unwrapped key: [32-byte seed][32-byte public key]
+            key_material = key_material[32:]
+        elif len(key_material) == 32:
+            # Raw 32-byte seed - derive the public key for us
+            key_material = rust_lib.ed25519_public_from_seed(key_material)
+
     token = token.decode('utf-8') if isinstance(token, bytes) else token
+
     try:
-        return rust_lib.paseto_decode(key_material, token, purpose=purpose, implicit_assertion=implicit_assertion)
+        return rust_lib.paseto_decode(key_material, token, purpose='public' if purpose == 'secret' else purpose, 
+            implicit_assertion=implicit_assertion)
     except ValueError as e:
         raise DecryptError('Failed to decrypt') if purpose == 'local' else ValueError(str(e))
 
@@ -920,16 +933,13 @@ class Key(KeyInterface):
 
 
     @classmethod
-    def from_paserk(cls, paserk: str, wrapping_key: bytes | None = None, password: str | None = None):
+    def from_paserk(cls, paserk: str, wrapping_key: bytes | None = None, password: str | None = None, unsealing_key: bytes | None = None):
         '''Creates a Key object by decoding and unwrapping a PASERK string.'''
+        
         try:
             # We let Rust do the heavy lifting of parsing, validating, and decrypting (PIE/PBKW)
             key_bytes = rust_lib.decode_paserk_key(
-                paserk, 
-                purpose=None, # Let Rust auto-detect the purpose from the string
-                wrapping_key=wrapping_key, 
-                password=password
-            )
+                paserk, purpose=None, wrapping_key=wrapping_key, password=password, unsealing_key=unsealing_key)
         except ValueError as e:
             err_str = str(e)
             # pyseto expects DecryptError for unwrapping failures
@@ -940,19 +950,24 @@ class Key(KeyInterface):
         # Extract the purpose directly from the string to set on the object
         parts = paserk.split('.')
         purpose_tag = parts[1].split('-')[0] # 'local-wrap' -> 'local'
-        purpose = 'secret' if purpose_tag == 'secret' else purpose_tag
 
-        return cls(4, purpose, key_bytes)
+        # Determine the functional PASETO purpose based on the PASERK type
+        # "seal", "local-wrap", and "local-pw" all contain a local symmetric key.
+        purpose = "local"
+        if ".secret" in paserk:
+            purpose = "secret"
+        elif ".public" in paserk:
+            purpose = "public"
+
+        return cls(purpose, key_bytes)
 
 
-    def to_paserk(self, wrapping_key: bytes | None = None, password: str | None = None) -> str:
+    def to_paserk(self, wrapping_key: bytes | None = None, password: str | None = None, sealing_key: bytes | None = None
+        ) -> str:
         '''Exports the Key to a PASERK string, optionally wrapping/sealing it.'''
+        
         return rust_lib.encode_paserk_key(
-            self.purpose, 
-            self.key_bytes, 
-            wrapping_key=wrapping_key, 
-            password=password
-        )
+            self.purpose, self.key_bytes, wrapping_key=wrapping_key, password=password, sealing_key=sealing_key)
 
 
     def encrypt(self, payload: bytes, footer: bytes = b'', implicit_assertion: bytes = b'') -> bytes:
