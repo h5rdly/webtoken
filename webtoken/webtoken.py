@@ -806,6 +806,14 @@ class Serializer:
         return rust_lib.json_dumps(json_dict)
 
 
+@dataclass(frozen=True, slots=True)
+class Token:
+    payload: dict | bytes
+    footer: bytes
+    purpose: str
+    version: str = 'v4'
+
+
 def paseto_encode(key: bytes | str, payload: str, purpose: str | None=None, footer: str | bytes=None, implicit_assertion=None, 
     nonce=None, serializer=Serializer, add_iat: bool = False, exp_seconds: int | None = None) -> str:
 
@@ -915,16 +923,11 @@ class EncryptError(Exception):
 class DecryptError(Exception):
     pass
 
-class KeyInterface:
+class VerifyError(Exception):
     pass
 
-
-@dataclass(frozen=True, slots=True)
-class Token:
-    payload: dict | bytes
-    footer: bytes
-    purpose: str
-    version: str = 'v4'
+class KeyInterface:
+    pass
 
 
 class Key(KeyInterface):
