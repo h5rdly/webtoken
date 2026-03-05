@@ -10,7 +10,7 @@ use subtle::ConstantTimeEq;
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 
-use crate::{BytesOrString, WebtokenError, crypto, key_utils, jwk};
+use crate::{BytesOrString, WebtokenError, crypto, crypto_parsing, key_utils, jwk};
 
 // PAE helper needed for Public Signatures (Local uses the one in crypto.rs)
 fn pae(pieces: &[&[u8]]) -> Vec<u8> {
@@ -128,21 +128,22 @@ pub fn encode_paserk(
     }
 
     // Sealing (PKE via X25519)
-    if let Some(xpk) = sealing_key {
+    if let Some(xpk_input) = sealing_key {
         if purpose != "local" {
             return Err(WebtokenError::InvalidKey("Key sealing can only be used for local key.".into()));
         }
-        if xpk.len() != 32 {
-            return Err(WebtokenError::InvalidKey("Invalid sealing key length".into()));
-        }
+
+        // Extract raw 32 bytes from potential PEM/DER wrapper
+        let xpk_vec = crypto_parsing::extract_x25519_bytes(xpk_input)?;
+        let xpk = xpk_vec.as_slice();
         
         let header_str = format!("k4.seal.");
         let h = header_str.as_bytes();
         
         // Generate Ephemeral X25519 Keypair
-        let esk = crate::crypto::get_random_bytes(32)?;
-        let epk = crate::crypto::x25519_public_from_private(&esk)?;
-        let xk = crate::crypto::x25519_derive(&esk, xpk)?;
+        let esk = crypto::get_random_bytes(32)?;
+        let epk = crypto::x25519_public_from_private(&esk)?;
+        let xk = crypto::x25519_derive(&esk, xpk)?;
         
         // Derive Encryption Key (ek)
         let mut ek_msg = vec![0x01];
@@ -260,7 +261,7 @@ pub fn decode_paserk(
     let is_pw = parts[1] == "local-pw" || parts[1] == "secret-pw";
     let is_seal = parts[1] == "seal";
 
-    // 1. PIE Decoding
+    // PIE Decoding
     if is_wrapped {
         if parts.len() != 4 || parts[2] != "pie" {
             return Err(WebtokenError::InvalidKey("Invalid PASERK format.".into()));
@@ -323,7 +324,7 @@ pub fn decode_paserk(
             return Err(WebtokenError::InvalidKey("Failed to unwrap a key.".into())); 
         }
         
-    // 2. Password Decoding (Temporarily adding prints to inspect the 26-byte prefix)
+    // Password Decoding (Temporarily adding prints to inspect the 26-byte prefix)
     } else if is_pw {
         if parts.len() != 3 {
             return Err(WebtokenError::InvalidKey("Invalid PASERK format.".into()));
@@ -405,12 +406,13 @@ pub fn decode_paserk(
 
         return Ok(ptk);
         
-    // 3. Seal Decoding (PKE via X25519)
+    // Seal Decoding (PKE via X25519)
     } else if is_seal {
-        let xsk = unsealing_key.ok_or_else(|| WebtokenError::InvalidKey("seal needs unsealing_key.".into()))?;
-        if xsk.len() != 32 {
-            return Err(WebtokenError::InvalidKey("Invalid unsealing key length".into()));
-        }
+        let xsk_input = unsealing_key.ok_or_else(|| WebtokenError::InvalidKey("seal needs unsealing_key.".into()))?;
+        
+        // Extract raw 32 bytes from potential PEM/DER wrapper
+        let xsk_vec = crypto_parsing::extract_x25519_bytes(xsk_input)?;
+        let xsk = xsk_vec.as_slice();
         
         let header_str = format!("k4.seal.");
         let h = header_str.as_bytes();

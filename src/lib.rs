@@ -916,9 +916,9 @@ fn paseto_encode(key: BytesOrString, payload: &Bound<'_, PyAny>, purpose: &str, 
 #[pyfunction]
 #[pyo3(signature = (key, token, purpose="local", implicit_assertion=None))]
 fn paseto_decode<'py>(py: Python<'py>, key: BytesOrString, token: &str, purpose: &str, implicit_assertion: Option<&[u8]>
-) -> PyResult<Bound<'py, PyAny>> {
+) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyBytes>)>{
 
-    let (payload_bytes, _footer) = match purpose {
+    let (payload_bytes, footer) = match purpose {
         "local" => {
              paseto::decrypt_v4_local(token, key.as_bytes(), implicit_assertion)
                 .map_err(|e| PyValueError::new_err(format!("{}", e)))?
@@ -930,13 +930,16 @@ fn paseto_decode<'py>(py: Python<'py>, key: BytesOrString, token: &str, purpose:
         _ => return Err(PyValueError::new_err("Purpose must be 'local' or 'public'"))
     };
 
+    let footer_py = pyo3::types::PyBytes::new(py, &footer);
+
     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&payload_bytes) {
         if let Ok(py_obj) = pythonize::pythonize(py, &val) {
-            return Ok(py_obj);
+            return Ok((py_obj, footer_py));
         }
     }
 
-    Ok(pyo3::types::PyBytes::new(py, &payload_bytes).into_any())
+    let payload_py = pyo3::types::PyBytes::new(py, &payload_bytes).into_any();
+    Ok((payload_py, footer_py))
 }
 
 

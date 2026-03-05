@@ -1,5 +1,5 @@
 
-import sys, json
+import sys
 sys.path.append(__file__.replace('\\', '/').rsplit("/", 2)[0])
 
 import webtoken
@@ -33,8 +33,8 @@ class TestWithTestVectorsV4:
                     assert "payload should be bytes, str or dict." in str(err.value)
                     return
 
-                secret_key_pem = v["secret-key"] if version == 1 else v["secret-key-pem"]
-                public_key_pem = v["public-key"] if version == 1 else v["public-key-pem"]
+                secret_key_pem = v["secret-key-pem"]
+                public_key_pem = v["public-key-pem"]
 
                 sk = Key.new("public", secret_key_pem)
                 with pytest.raises(ValueError) as err:
@@ -43,28 +43,28 @@ class TestWithTestVectorsV4:
                 assert "payload should be bytes, str or dict." in str(err.value)
                 return
 
-            payload = json.loads(payload)
+            payload = webtoken.json_loads(payload)
             if purpose == "E":
                 nonce = bytes.fromhex(v["nonce"])
                 key = bytes.fromhex(v["key"])
 
                 k = Key.new("local", key=key)
                 encoded = webtoken.paseto_encode(k, payload, footer, implicit_assertion, nonce=nonce)
-                decoded_token = webtoken.paseto_decode(k, token, implicit_assertion)
-                decoded = webtoken.paseto_decode(k, encoded, implicit_assertion)
-                assert payload == decoded_token == decoded
+                decoded_token = webtoken.paseto_decode(k, token, implicit_assertion, validate_claims=False)
+                decoded = webtoken.paseto_decode(k, encoded, implicit_assertion, validate_claims=False)
+                assert payload == decoded_token.payload == decoded.payload
                 return
 
             if purpose == "S":
-                secret_key_pem = v["secret-key"] if version == 1 else v["secret-key-pem"]
-                public_key_pem = v["public-key"] if version == 1 else v["public-key-pem"]
+                secret_key_pem = v["secret-key-pem"]
+                public_key_pem = v["public-key-pem"]
 
                 sk = Key.new("public", secret_key_pem)
                 encoded = webtoken.paseto_encode(sk, payload, footer, implicit_assertion)
                 pk = Key.new("public", public_key_pem)
                 decoded_token = webtoken.paseto_decode(pk, token, implicit_assertion)
                 decoded = webtoken.paseto_decode(pk, encoded, implicit_assertion)
-                assert payload == decoded_token == decoded
+                assert payload == decoded_token.payload == decoded.payload
 
                 secret_key = bytes.fromhex(v["secret-key"])
                 public_key = bytes.fromhex(v["public-key"])
@@ -74,7 +74,7 @@ class TestWithTestVectorsV4:
                 pk = Key.from_asymmetric_key_params(x=public_key)
                 decoded_token = webtoken.paseto_decode(pk, token, implicit_assertion)
                 decoded = webtoken.paseto_decode(pk, encoded, implicit_assertion)
-                assert payload == decoded_token == decoded
+                assert payload == decoded_token.payload == decoded.payload
 
                 return
 
@@ -142,15 +142,15 @@ class TestWithTestVectorsV4:
             d = webtoken.paseto_decode(k, t)
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d == d1 == d2 == b"Hello world!"
+            assert d.payload == d1.payload == d2.payload == b"Hello world!"
 
             t = webtoken.paseto_encode(k1, b"Hello world!")
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d1 == d2 == b"Hello world!"
+            assert d1.payload == d2.payload == b"Hello world!"
 
             d = webtoken.paseto_decode(k, t)
-            assert d == b"Hello world!"
+            assert d.payload == b"Hello world!"
 
 
     def test_with_test_vectors_paserk_secret_wrap_pie(self):
@@ -166,15 +166,15 @@ class TestWithTestVectorsV4:
             d = webtoken.paseto_decode(k, t)
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d == d1 == d2 == b"Hello world!"
+            assert d.payload == d1.payload == d2.payload == b"Hello world!"
 
             t = webtoken.paseto_encode(k1, b"Hello world!")
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d1 == d2 == b"Hello world!"
+            assert d1.payload == d2.payload == b"Hello world!"
 
             d = webtoken.paseto_decode(k, t)
-            assert d == b"Hello world!"
+            assert d.payload == b"Hello world!"
 
 
     def test_with_test_vectors_paserk_local_pw(self):
@@ -193,15 +193,15 @@ class TestWithTestVectorsV4:
             d = webtoken.paseto_decode(k, t)
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d == d1 == d2 == b"Hello world!"
+            assert d.payload == d1.payload == d2.payload == b"Hello world!"
 
             t = webtoken.paseto_encode(k1, b"Hello world!")
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d1 == d2 == b"Hello world!"
+            assert d1.payload == d2.payload == b"Hello world!"
 
             d = webtoken.paseto_decode(k, t)
-            assert d == b"Hello world!"
+            assert d.payload == b"Hello world!"
 
 
     def test_with_test_vectors_paserk_secret_pw(self):
@@ -217,15 +217,15 @@ class TestWithTestVectorsV4:
             d = webtoken.paseto_decode(k, t)
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d == d1 == d2 == b"Hello world!"
+            assert d.payload == d1.payload == d2.payload == b"Hello world!"
 
             t = webtoken.paseto_encode(k1, b"Hello world!")
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d1 == d2 == b"Hello world!"
+            assert d1.payload == d2.payload == b"Hello world!"
 
             d = webtoken.paseto_decode(k, t)
-            assert d == b"Hello world!"
+            assert d.payload == b"Hello world!"
 
 
     def test_with_test_vectors_paserk_seal_v4(self):
@@ -245,15 +245,15 @@ class TestWithTestVectorsV4:
             d = webtoken.paseto_decode(k, t)
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d == d1 == d2 == b"Hello world!"
+            assert d.payload == d1.payload == d2.payload == b"Hello world!"
 
             t = webtoken.paseto_encode(k1, b"Hello world!")
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d1 == d2 == b"Hello world!"
+            assert d1.payload == d2.payload == b"Hello world!"
 
             d = webtoken.paseto_decode(k, t)
-            assert d == b"Hello world!"
+            assert d.payload == b"Hello world!"
 
 
 

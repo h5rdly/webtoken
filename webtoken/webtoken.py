@@ -1,6 +1,9 @@
-import os, sys, types, importlib.util, datetime, warnings, json
+import os, sys, types, importlib.util, warnings, json
 
 from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
+
 
 
 ## -- Moudle loading helpers 
@@ -157,7 +160,7 @@ def encode(
     # Custom encoders or raw bytes (PyJWS)
     if isinstance(payload, dict):
         for time_claim in ['exp', 'iat', 'nbf']:
-            if isinstance((claim := payload.get(time_claim)), datetime.datetime):
+            if isinstance((claim := payload.get(time_claim)), datetime):
                 payload[time_claim] = int(claim.replace(tzinfo=datetime.timezone.utc).timestamp())
         
         payload = json.dumps(payload, separators=(',', ':'), cls=json_encoder).encode('utf-8')
@@ -178,7 +181,7 @@ def decode_complete(
     token: str, key: str | bytes | PyJWK = None, algorithms: list[str] | None = None,
     options: dict[str, object] | None = None, audience: str | list[str] = None, 
     issuer: str = None, subject: str = None, verify: object = _sentinel, 
-    content: bytes = None, leeway: int | float | datetime.timedelta = 0, **kwargs
+    content: bytes = None, leeway: int | float | timedelta = 0, **kwargs
 ) -> dict[str, object]:
     
     merged_options = options.copy() if options else {}
@@ -189,7 +192,7 @@ def decode_complete(
             merged_options['verify_signature'] = False
     
     verify_sig = merged_options.get('verify_signature', True)
-    merged_options['leeway'] = int(leeway.total_seconds() if isinstance(leeway, datetime.timedelta) else leeway)
+    merged_options['leeway'] = int(leeway.total_seconds() if isinstance(leeway, timedelta) else leeway)
     
     decoded_struct = _rust_decode_with_exception_fix(
         token, key, algorithms, merged_options, audience, issuer, subject, verify_sig, content)
@@ -798,8 +801,13 @@ sys.modules['webtoken.curves'] = curves
 
 ## -- Pyseto support shims
 
-def paseto_encode(key: bytes | str, payload: str, purpose: str | None=None, footer=None, implicit_assertion=None, 
-    nonce=None) -> str:
+class Serializer:
+    def dumps(json_dict):
+        return rust_lib.json_dumps(json_dict)
+
+
+def paseto_encode(key: bytes | str, payload: str, purpose: str | None=None, footer: str | bytes=None, implicit_assertion=None, 
+    nonce=None, serializer=Serializer, add_iat: bool = False, exp_seconds: int | None = None) -> str:
 
     if hasattr(key, 'key_bytes'):
         key_material = key.key_bytes
@@ -814,11 +822,35 @@ def paseto_encode(key: bytes | str, payload: str, purpose: str | None=None, foot
     # but rust's paseto_encode match block expects 'public' to trigger sign_v4_public
     purpose = 'public' if purpose == 'secret' else purpose
 
+    if isinstance(payload, dict):
+        now = datetime.now(tz=timezone.utc)
+        if add_iat and "iat" not in payload:
+            payload["iat"] = now.isoformat(timespec="seconds")
+        if exp_seconds is not None and "exp" not in payload:
+            payload["exp"] = (now + timedelta(seconds=exp_seconds)).isoformat(timespec="seconds")
+            
+    if isinstance(payload, dict) and serializer:
+        payload = serializer.dumps(payload)
+
+    if isinstance(footer, dict) and serializer:
+        footer = serializer.dumps(footer)
+
+    payload = payload.encode('utf-8') if isinstance(payload, str) else payload
+    footer = footer.encode('utf-8') if isinstance(footer, str) else footer
+
     return rust_lib.paseto_encode(key_material, payload, purpose=purpose, footer=footer, 
         implicit_assertion=implicit_assertion, nonce=nonce)
 
 
-def paseto_decode(key: bytes | str, token: bytes | str, purpose: str | None=None, implicit_assertion=None):
+def paseto_decode(
+    key: bytes | str, 
+    token: bytes | str, 
+    purpose: str | None=None, 
+    implicit_assertion=None, 
+    deserializer=None,
+    leeway: int = 0,
+    validate_claims: bool = True  
+) -> Token:
 
     if hasattr(key, 'key_bytes'):
         key_material = key.key_bytes
@@ -838,10 +870,40 @@ def paseto_decode(key: bytes | str, token: bytes | str, purpose: str | None=None
     token = token.decode('utf-8') if isinstance(token, bytes) else token
 
     try:
-        return rust_lib.paseto_decode(key_material, token, purpose='public' if purpose == 'secret' else purpose, 
+        payload, footer = rust_lib.paseto_decode(key_material, token, purpose='public' if purpose == 'secret' else purpose, 
             implicit_assertion=implicit_assertion)
     except ValueError as e:
         raise DecryptError('Failed to decrypt') if purpose == 'local' else ValueError(str(e))
+
+    if deserializer and isinstance(payload, (bytes, str)):
+        payload = deserializer.loads(payload)
+
+    if deserializer and isinstance(footer, (bytes, str)):
+        try:
+            footer = deserializer.loads(footer)
+        except Exception as e:
+            pass
+    
+    if isinstance(payload, dict) and validate_claims:
+
+        now = datetime.now(tz=timezone.utc)
+        
+        # Check Expiration 
+        if "exp" in payload:
+            exp_time = datetime.fromisoformat(payload["exp"])
+            if now > exp_time + timedelta(seconds=leeway):
+                raise ValueError("Token has expired")
+                
+        # Check Not Before 
+        if "nbf" in payload:
+            nbf_time = datetime.fromisoformat(payload["nbf"])
+            if now < nbf_time - timedelta(seconds=leeway):
+                raise ValueError("Token is not yet valid")
+
+    footer = footer.decode('utf-8') if isinstance(footer, bytes) else footer
+    purpose = token.split('.')[1]
+
+    return Token(payload, footer, purpose)
 
 
 class NotSupportedError(Exception):
@@ -855,6 +917,14 @@ class DecryptError(Exception):
 
 class KeyInterface:
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class Token:
+    payload: dict | bytes
+    footer: bytes
+    purpose: str
+    version: str = 'v4'
 
 
 class Key(KeyInterface):
