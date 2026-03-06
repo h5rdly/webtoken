@@ -7,7 +7,7 @@ name = "webtoken"
 version = "0.5.0"
 description = "A Rust-backed JWT library"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 
 [project.urls]
 Homepage = "https://github.com/h5rdly/webtoken/wiki"
