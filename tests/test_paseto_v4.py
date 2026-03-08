@@ -4,6 +4,7 @@ sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 import webtoken
 from webtoken import Key, EncryptError, DecryptError
 
+from keys_and_vectors import PUBLIC_KEY_ED25519, PUBLIC_KEY_ED25519_2, PRIVATE_KEY_ED25519
 import pytest
 
 
@@ -123,21 +124,3 @@ class TestV4Public:
         assert msg in str(err.value)
 
 
-
-PRIVATE_KEY_ED25519 = '''
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEILTL+0PfTOIQcn2VPkpxMwf6Gbt9n4UEFDjZ4RuUKjd0
------END PRIVATE KEY-----
-'''
-
-PUBLIC_KEY_ED25519 = '''
------BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAHrnbu7wEfAP9cGBOAHHwmH4Wsot1ciXBHwBBXQ4gsaI=
------END PUBLIC KEY-----
-'''
-
-PUBLIC_KEY_ED25519_2 = '''
------BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAkv4y3wCgwetRuJUt/EKjNJzaTWMKCNcadaGg6obUFdI=
------END PUBLIC KEY-----
-'''

@@ -383,7 +383,7 @@ class PyJWS:
             if k not in pyjwt_allowed_kwargs:
                 # To pass PyJWT compat tests, dump at some point
                 warnings.warn(
-                    f'Argument "{k}" is not supported and will be removed in a future version',
+                    f"Argument '{k}' is not supported and will be removed in a future version",
                     category=RemovedInPyjwt3Warning,
                     stacklevel=2,
                 )
@@ -806,24 +806,68 @@ class Serializer:
         return rust_lib.json_dumps(json_dict)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class Token:
+
     payload: dict | bytes
     footer: bytes
     purpose: str
     version: str = 'v4'
 
+    @classmethod
+    def new(cls, token: bytes | str):
 
-def paseto_encode(key: bytes | str, payload: str, purpose: str | None=None, footer: str | bytes=None, implicit_assertion=None, 
-    nonce=None, serializer=Serializer, add_iat: bool = False, exp_seconds: int | None = None) -> str:
+        token_str = token.decode('utf-8') if isinstance(token, bytes) else token
+        parts = token_str.split('.')
+        
+        if len(parts) < 3 or len(parts) > 4:
+            raise ValueError('token is invalid')
+            
+        if not parts[2]:
+            raise ValueError('Empty payload')
+            
+        version, purpose = parts[0], parts[1]
+        if version != 'v4':
+            raise ValueError(f'webtoken only supports paseto V4, got - {version}')
+        version = 'v4'
+
+        try:
+            payload = rust_lib.base64url_decode(parts[2])
+            footer = rust_lib.base64url_decode(parts[3]) if len(parts) == 4 else b''
+        except Exception:
+            raise ValueError('token is invalid.')
+
+        return cls(payload=payload, footer=footer, purpose=purpose, version=version)
+
+
+
+def paseto_encode(
+    key: bytes | str, 
+    payload: str, 
+    purpose: str | None=None, 
+    footer: str | bytes | dict=None, 
+    implicit_assertion=None, 
+    nonce=None, 
+    serializer=Serializer, 
+    add_iat: bool = False, 
+    exp_seconds: int | None = None
+) -> str:
+
+    if isinstance(payload, dict) and not serializer:
+        raise ValueError('serializer should be specified for the payload object')
+
+    if isinstance(footer, dict) and not serializer:
+        raise ValueError('serializer should be specified for the footer object')
 
     if hasattr(key, 'key_bytes'):
         key_material = key.key_bytes
-        purpose = purpose or getattr(key, 'purpose', 'local')
+        if (key_purpose := getattr(key, 'purpose', 'local')) == 'public':
+            raise ValueError('A public key cannot be used for signing')
+        purpose = purpose or key_purpose
     else:
         key_material = key
 
-    if purpose == "secret" and isinstance(key_material, bytes) and len(key_material) == 64:
+    if purpose == 'secret' and isinstance(key_material, bytes) and len(key_material) == 64:
         key_material = key_material[:32]
 
     # The Key object sets purpose='secret' for private keys for compat
@@ -832,16 +876,25 @@ def paseto_encode(key: bytes | str, payload: str, purpose: str | None=None, foot
 
     if isinstance(payload, dict):
         now = datetime.now(tz=timezone.utc)
-        if add_iat and "iat" not in payload:
-            payload["iat"] = now.isoformat(timespec="seconds")
-        if exp_seconds is not None and "exp" not in payload:
-            payload["exp"] = (now + timedelta(seconds=exp_seconds)).isoformat(timespec="seconds")
-            
+        if add_iat and 'iat' not in payload:
+            payload['iat'] = now.isoformat(timespec='seconds')
+        if exp_seconds is not None and 'exp' not in payload:
+            payload['exp'] = (now + timedelta(seconds=exp_seconds)).isoformat(timespec='seconds')
+    
+    if not hasattr(serializer, 'dumps') or not callable(getattr(serializer, 'dumps')):
+        raise ValueError('serializer should have dumps()')
+
     if isinstance(payload, dict) and serializer:
-        payload = serializer.dumps(payload)
+        try:
+            payload = serializer.dumps(payload)
+        except Exception as e:
+            raise ValueError(f'Failed to serialize the payload. {e}')
 
     if isinstance(footer, dict) and serializer:
-        footer = serializer.dumps(footer)
+        try:
+            footer = serializer.dumps(footer)
+        except Exception as e:
+            raise ValueError(f'Failed to serialize the footer. {e}')
 
     payload = payload.encode('utf-8') if isinstance(payload, str) else payload
     footer = footer.encode('utf-8') if isinstance(footer, str) else footer
@@ -851,14 +904,30 @@ def paseto_encode(key: bytes | str, payload: str, purpose: str | None=None, foot
 
 
 def paseto_decode(
-    key: bytes | str, 
+    key: bytes | str | list, 
     token: bytes | str, 
     purpose: str | None=None, 
     implicit_assertion=None, 
     deserializer=None,
     leeway: int = 0,
-    validate_claims: bool = True  
+    validate_claims: bool = True,
+    aud: str | list | None = None,  
 ) -> Token:
+
+    if isinstance(key, list):
+        errors = []
+        for k in key:
+            try:
+                print(f'{deserializer=}')
+                return paseto_decode(
+                    k, token, purpose, implicit_assertion, deserializer, leeway, validate_claims, aud
+                )
+            except Exception as e:
+                errors.append(e)
+                continue
+                
+        # none of the keys worked
+        raise ValueError('key is not found for verifying the token' + (f'\n- {errors}' if errors else ''))
 
     if hasattr(key, 'key_bytes'):
         key_material = key.key_bytes
@@ -867,7 +936,7 @@ def paseto_decode(
         key_material = key
 
     # If the user passed a secret key to decode, we provide the public half
-    if purpose == "secret" and isinstance(key_material, bytes):
+    if purpose == 'secret' and isinstance(key_material, bytes):
         if len(key_material) == 64:
             # PASERK unwrapped key: [32-byte seed][32-byte public key]
             key_material = key_material[32:]
@@ -875,16 +944,30 @@ def paseto_decode(
             # Raw 32-byte seed - derive the public key for us
             key_material = rust_lib.ed25519_public_from_seed(key_material)
 
+    if isinstance(key_material, bytes) and len(key_material) != 32:
+        raise ValueError('key is not found for verifying the token')
+
     token = token.decode('utf-8') if isinstance(token, bytes) else token
 
     try:
-        payload, footer = rust_lib.paseto_decode(key_material, token, purpose='public' if purpose == 'secret' else purpose, 
-            implicit_assertion=implicit_assertion)
+        payload, footer = rust_lib.paseto_decode(
+            key_material, token, purpose='public' if purpose == 'secret' else purpose, implicit_assertion=implicit_assertion
+            )
     except ValueError as e:
+        if 'too short' in str(e).lower():
+            raise ValueError('Invalid payload')
+
         raise DecryptError('Failed to decrypt') if purpose == 'local' else ValueError(str(e))
 
-    if deserializer and isinstance(payload, (bytes, str)):
-        payload = deserializer.loads(payload)
+
+    if deserializer:
+        if not hasattr(deserializer, 'loads') or not callable(getattr(deserializer, 'loads')):
+            raise ValueError('deserializer should have loads()')
+        raw_payload = json.dumps(payload).encode('utf-8') if isinstance(payload, dict) else payload
+        try:
+            payload = deserializer.loads(raw_payload)
+        except Exception as e:
+            raise ValueError(f'Failed to deserialize the payload: {e}')
 
     if deserializer and isinstance(footer, (bytes, str)):
         try:
@@ -897,18 +980,41 @@ def paseto_decode(
         now = datetime.now(tz=timezone.utc)
         
         # Check Expiration 
-        if "exp" in payload:
-            exp_time = datetime.fromisoformat(payload["exp"])
+        if 'exp' in payload:
+            try:
+                exp_time = datetime.fromisoformat(payload['exp'])
+            except (ValueError, TypeError):
+                raise VerifyError('Invalid exp')
+
             if now > exp_time + timedelta(seconds=leeway):
-                raise ValueError("Token has expired")
+                raise VerifyError('Token has expired')
                 
         # Check Not Before 
-        if "nbf" in payload:
-            nbf_time = datetime.fromisoformat(payload["nbf"])
-            if now < nbf_time - timedelta(seconds=leeway):
-                raise ValueError("Token is not yet valid")
+        if 'nbf' in payload:
+            try:
+                nbf_time = datetime.fromisoformat(payload['nbf'])
+            except (ValueError, TypeError):
+                raise VerifyError('Invalid nbf')
 
-    footer = footer.decode('utf-8') if isinstance(footer, bytes) else footer
+            if now < nbf_time - timedelta(seconds=leeway):
+                raise VerifyError('Token is not yet valid')
+
+        if aud is not None:
+            if 'aud' not in payload:
+                raise VerifyError('aud verification failed')
+            
+            # The token's audience might be a single string or a list of strings
+            token_aud = payload['aud']
+            if isinstance(token_aud, str):
+                token_aud = [token_aud]
+                
+            # The expected audience might be a single string or a list of strings
+            expected_aud = [aud] if isinstance(aud, str) else aud
+            
+            # Check if there is any overlap between the expected and actual audiences
+            if not any(a in token_aud for a in expected_aud):
+                raise VerifyError('aud verification failed')
+                
     purpose = token.split('.')[1]
 
     return Token(payload, footer, purpose)
@@ -987,6 +1093,12 @@ class Key(KeyInterface):
                 raise ValueError('The key is not Ed25519 key.')
             raise ValueError('Failed to load key.')
 
+        if actual_purpose == 'public' and len(key_bytes) != 32:
+            raise ValueError('The key is not Ed25519 key.')
+        
+        if actual_purpose == 'secret' and len(key_bytes) not in (32, 64):
+            raise ValueError('The key is not Ed25519 key.')
+
         return cls(actual_purpose, key_bytes)
 
 
@@ -1025,12 +1137,12 @@ class Key(KeyInterface):
         purpose_tag = parts[1].split('-')[0] # 'local-wrap' -> 'local'
 
         # Determine the functional PASETO purpose based on the PASERK type
-        # "seal", "local-wrap", and "local-pw" all contain a local symmetric key.
-        purpose = "local"
-        if ".secret" in paserk:
-            purpose = "secret"
-        elif ".public" in paserk:
-            purpose = "public"
+        # 'seal', 'local-wrap', and 'local-pw' all contain a local symmetric key.
+        purpose = 'local'
+        if '.secret' in paserk:
+            purpose = 'secret'
+        elif '.public' in paserk:
+            purpose = 'public'
 
         return cls(purpose, key_bytes)
 

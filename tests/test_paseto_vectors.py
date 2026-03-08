@@ -1,6 +1,6 @@
 
 import sys
-sys.path.append(__file__.replace('\\', '/').rsplit("/", 2)[0])
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
 import webtoken
 from webtoken import Key
@@ -14,60 +14,60 @@ class TestWithTestVectorsV4:
 
         for v in webtoken.json_loads(V4)['tests']:
 
-            token = v["token"].encode('utf8')
-            payload = v["payload"]
-            footer = v["footer"].encode('utf8')
-            implicit_assertion = v["implicit-assertion"].encode('utf8')
+            token = v['token'].encode('utf8')
+            payload = v['payload']
+            footer = v['footer'].encode('utf8')
+            implicit_assertion = v['implicit-assertion'].encode('utf8')
 
-            purpose = v["name"].split("-")[1]
+            purpose = v['name'].split('-')[1]
 
-            if v["expect-fail"]:
-                if "public-key" not in v:
-                    nonce = bytes.fromhex(v["nonce"])
-                    key = bytes.fromhex(v["key"])
+            if v['expect-fail']:
+                if 'public-key' not in v:
+                    nonce = bytes.fromhex(v['nonce'])
+                    key = bytes.fromhex(v['key'])
 
-                    k = Key.new("local", key=key)
+                    k = Key.new('local', key=key)
                     with pytest.raises(ValueError) as err:
                         webtoken.paseto_encode(k, payload, footer, implicit_assertion, nonce=nonce)
-                        pytest.fail("encode should fail.")
-                    assert "payload should be bytes, str or dict." in str(err.value)
+                        pytest.fail('encode should fail.')
+                    assert 'payload should be bytes, str or dict.' in str(err.value)
                     return
 
-                secret_key_pem = v["secret-key-pem"]
-                public_key_pem = v["public-key-pem"]
+                secret_key_pem = v['secret-key-pem']
+                public_key_pem = v['public-key-pem']
 
-                sk = Key.new("public", secret_key_pem)
+                sk = Key.new('public', secret_key_pem)
                 with pytest.raises(ValueError) as err:
                     webtoken.paseto_encode(sk, payload, footer, implicit_assertion)
-                    pytest.fail("encode should fail.")
-                assert "payload should be bytes, str or dict." in str(err.value)
+                    pytest.fail('encode should fail.')
+                assert 'payload should be bytes, str or dict.' in str(err.value)
                 return
 
             payload = webtoken.json_loads(payload)
-            if purpose == "E":
-                nonce = bytes.fromhex(v["nonce"])
-                key = bytes.fromhex(v["key"])
+            if purpose == 'E':
+                nonce = bytes.fromhex(v['nonce'])
+                key = bytes.fromhex(v['key'])
 
-                k = Key.new("local", key=key)
+                k = Key.new('local', key=key)
                 encoded = webtoken.paseto_encode(k, payload, footer, implicit_assertion, nonce=nonce)
                 decoded_token = webtoken.paseto_decode(k, token, implicit_assertion, validate_claims=False)
                 decoded = webtoken.paseto_decode(k, encoded, implicit_assertion, validate_claims=False)
                 assert payload == decoded_token.payload == decoded.payload
                 return
 
-            if purpose == "S":
-                secret_key_pem = v["secret-key-pem"]
-                public_key_pem = v["public-key-pem"]
+            if purpose == 'S':
+                secret_key_pem = v['secret-key-pem']
+                public_key_pem = v['public-key-pem']
 
-                sk = Key.new("public", secret_key_pem)
+                sk = Key.new('public', secret_key_pem)
                 encoded = webtoken.paseto_encode(sk, payload, footer, implicit_assertion)
-                pk = Key.new("public", public_key_pem)
+                pk = Key.new('public', public_key_pem)
                 decoded_token = webtoken.paseto_decode(pk, token, implicit_assertion)
                 decoded = webtoken.paseto_decode(pk, encoded, implicit_assertion)
                 assert payload == decoded_token.payload == decoded.payload
 
-                secret_key = bytes.fromhex(v["secret-key"])
-                public_key = bytes.fromhex(v["public-key"])
+                secret_key = bytes.fromhex(v['secret-key'])
+                public_key = bytes.fromhex(v['public-key'])
 
                 sk = Key.from_asymmetric_key_params(d=secret_key[0:32])
                 encoded = webtoken.paseto_encode(sk, payload, footer, implicit_assertion)
@@ -78,182 +78,182 @@ class TestWithTestVectorsV4:
 
                 return
 
-            pytest.fail(f"Invalid test name: {v['name']}")
+            pytest.fail(f'Invalid test name: {v['name']}')
 
 
     def test_with_test_vectors_paserk_public(self):
 
         for v in webtoken.json_loads(K4_PUBLIC)['tests']:
-            k = Key.from_asymmetric_key_params(x=bytes.fromhex(v["key"]))
-            assert k.to_paserk() == v["paserk"]
-            k2 = Key.from_paserk(v["paserk"])
-            assert k2.to_paserk() == v["paserk"]
+            k = Key.from_asymmetric_key_params(x=bytes.fromhex(v['key']))
+            assert k.to_paserk() == v['paserk']
+            k2 = Key.from_paserk(v['paserk'])
+            assert k2.to_paserk() == v['paserk']
 
 
     def test_with_test_vectors_paserk_secret(self):
 
         for v in webtoken.json_loads(K4_SECRET)['tests']:
-            k = Key.from_asymmetric_key_params(d=bytes.fromhex(v["secret-key-seed"]))
-            assert k.to_paserk() == v["paserk"]
-            k2 = Key.from_paserk(v["paserk"])
-            assert k2.to_paserk() == v["paserk"]
+            k = Key.from_asymmetric_key_params(d=bytes.fromhex(v['secret-key-seed']))
+            assert k.to_paserk() == v['paserk']
+            k2 = Key.from_paserk(v['paserk'])
+            assert k2.to_paserk() == v['paserk']
 
 
     def test_with_test_vectors_paserk_local(self):
 
         for v in webtoken.json_loads(K4_LOCAL)['tests']:
-            k = Key.new("local", bytes.fromhex(v["key"]))
-            k2 = Key.from_paserk(v["paserk"])
-            assert k.to_paserk() == v["paserk"]
-            assert k2.to_paserk() == v["paserk"]
+            k = Key.new('local', bytes.fromhex(v['key']))
+            k2 = Key.from_paserk(v['paserk'])
+            assert k.to_paserk() == v['paserk']
+            assert k2.to_paserk() == v['paserk']
 
 
     def test_with_test_vectors_paserk_pid(self):
 
         for v in webtoken.json_loads(K4_PID)['tests']:
-            k = Key.from_asymmetric_key_params(x=bytes.fromhex(v["key"]))
-            assert k.to_paserk_id() == v["paserk"]
+            k = Key.from_asymmetric_key_params(x=bytes.fromhex(v['key']))
+            assert k.to_paserk_id() == v['paserk']
 
 
     def test_with_test_vectors_paserk_sid(self):
 
         for v in webtoken.json_loads(K4_SID)['tests']:
-            k = Key.from_asymmetric_key_params(d=bytes.fromhex(v["seed"]))
-            assert k.to_paserk_id() == v["paserk"]
+            k = Key.from_asymmetric_key_params(d=bytes.fromhex(v['seed']))
+            assert k.to_paserk_id() == v['paserk']
 
 
     def test_with_test_vectors_paserk_lid(self):
 
         for v in webtoken.json_loads(K4_LID)['tests']:
-            k = Key.new("local", bytes.fromhex(v["key"]))
-            assert k.to_paserk_id() == v["paserk"]
+            k = Key.new('local', bytes.fromhex(v['key']))
+            assert k.to_paserk_id() == v['paserk']
 
 
     def test_with_test_vectors_paserk_local_wrap_pie(self):
 
         for v in webtoken.json_loads(K4_LOCAL_WRAP_PIE)['tests']:
-            k = Key.from_paserk(v["paserk"], wrapping_key=bytes.fromhex(v["wrapping-key"]))
+            k = Key.from_paserk(v['paserk'], wrapping_key=bytes.fromhex(v['wrapping-key']))
 
-            k1 = Key.new("local", bytes.fromhex(v["unwrapped"]))
-            wpk = k1.to_paserk(wrapping_key=bytes.fromhex(v["wrapping-key"]))
-            k2 = Key.from_paserk(wpk, wrapping_key=bytes.fromhex(v["wrapping-key"]))
+            k1 = Key.new('local', bytes.fromhex(v['unwrapped']))
+            wpk = k1.to_paserk(wrapping_key=bytes.fromhex(v['wrapping-key']))
+            k2 = Key.from_paserk(wpk, wrapping_key=bytes.fromhex(v['wrapping-key']))
 
-            t = webtoken.paseto_encode(k, b"Hello world!")
+            t = webtoken.paseto_encode(k, b'Hello world!')
             d = webtoken.paseto_decode(k, t)
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d.payload == d1.payload == d2.payload == b"Hello world!"
+            assert d.payload == d1.payload == d2.payload == b'Hello world!'
 
-            t = webtoken.paseto_encode(k1, b"Hello world!")
+            t = webtoken.paseto_encode(k1, b'Hello world!')
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d1.payload == d2.payload == b"Hello world!"
+            assert d1.payload == d2.payload == b'Hello world!'
 
             d = webtoken.paseto_decode(k, t)
-            assert d.payload == b"Hello world!"
+            assert d.payload == b'Hello world!'
 
 
     def test_with_test_vectors_paserk_secret_wrap_pie(self):
         
         for v in webtoken.json_loads(K4_SECRET_WRAP_PIE)['tests']:
-            k = Key.from_paserk(v["paserk"], wrapping_key=bytes.fromhex(v["wrapping-key"]))
-            k1 = Key.from_asymmetric_key_params(d=bytes.fromhex(v["unwrapped"])[0:32])
+            k = Key.from_paserk(v['paserk'], wrapping_key=bytes.fromhex(v['wrapping-key']))
+            k1 = Key.from_asymmetric_key_params(d=bytes.fromhex(v['unwrapped'])[0:32])
 
-            wpk = k1.to_paserk(wrapping_key=bytes.fromhex(v["wrapping-key"]))
-            k2 = Key.from_paserk(wpk, wrapping_key=bytes.fromhex(v["wrapping-key"]))
+            wpk = k1.to_paserk(wrapping_key=bytes.fromhex(v['wrapping-key']))
+            k2 = Key.from_paserk(wpk, wrapping_key=bytes.fromhex(v['wrapping-key']))
 
-            t = webtoken.paseto_encode(k, b"Hello world!")
+            t = webtoken.paseto_encode(k, b'Hello world!')
             d = webtoken.paseto_decode(k, t)
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d.payload == d1.payload == d2.payload == b"Hello world!"
+            assert d.payload == d1.payload == d2.payload == b'Hello world!'
 
-            t = webtoken.paseto_encode(k1, b"Hello world!")
+            t = webtoken.paseto_encode(k1, b'Hello world!')
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d1.payload == d2.payload == b"Hello world!"
+            assert d1.payload == d2.payload == b'Hello world!'
 
             d = webtoken.paseto_decode(k, t)
-            assert d.payload == b"Hello world!"
+            assert d.payload == b'Hello world!'
 
 
     def test_with_test_vectors_paserk_local_pw(self):
 
         for v in webtoken.json_loads(K4_LOCAL_PW)['tests']:
-            password = v["password"]
-            k = Key.from_paserk(v["paserk"], password=password)
+            password = v['password']
+            k = Key.from_paserk(v['paserk'], password=password)
 
-            k1 = Key.new("local", bytes.fromhex(v["unwrapped"]))
+            k1 = Key.new('local', bytes.fromhex(v['unwrapped']))
             wpk = k1.to_paserk(password=password,)
 
             k2 = Key.from_paserk(wpk, password=password)
             assert k1.key_bytes == k2.key_bytes
 
-            t = webtoken.paseto_encode(k, b"Hello world!")
+            t = webtoken.paseto_encode(k, b'Hello world!')
             d = webtoken.paseto_decode(k, t)
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d.payload == d1.payload == d2.payload == b"Hello world!"
+            assert d.payload == d1.payload == d2.payload == b'Hello world!'
 
-            t = webtoken.paseto_encode(k1, b"Hello world!")
+            t = webtoken.paseto_encode(k1, b'Hello world!')
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d1.payload == d2.payload == b"Hello world!"
+            assert d1.payload == d2.payload == b'Hello world!'
 
             d = webtoken.paseto_decode(k, t)
-            assert d.payload == b"Hello world!"
+            assert d.payload == b'Hello world!'
 
 
     def test_with_test_vectors_paserk_secret_pw(self):
 
         for v in webtoken.json_loads(K4_SECRET_PW)['tests']:
-            k = Key.from_paserk(v["paserk"], password=v["password"])
-            k1 = Key.from_asymmetric_key_params(d=bytes.fromhex(v["unwrapped"])[0:32])
-            wpk = k1.to_paserk(password=v["password"])
+            k = Key.from_paserk(v['paserk'], password=v['password'])
+            k1 = Key.from_asymmetric_key_params(d=bytes.fromhex(v['unwrapped'])[0:32])
+            wpk = k1.to_paserk(password=v['password'])
 
-            k2 = Key.from_paserk(wpk, password=v["password"])
+            k2 = Key.from_paserk(wpk, password=v['password'])
 
-            t = webtoken.paseto_encode(k, b"Hello world!")
+            t = webtoken.paseto_encode(k, b'Hello world!')
             d = webtoken.paseto_decode(k, t)
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d.payload == d1.payload == d2.payload == b"Hello world!"
+            assert d.payload == d1.payload == d2.payload == b'Hello world!'
 
-            t = webtoken.paseto_encode(k1, b"Hello world!")
+            t = webtoken.paseto_encode(k1, b'Hello world!')
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d1.payload == d2.payload == b"Hello world!"
+            assert d1.payload == d2.payload == b'Hello world!'
 
             d = webtoken.paseto_decode(k, t)
-            assert d.payload == b"Hello world!"
+            assert d.payload == b'Hello world!'
 
 
     def test_with_test_vectors_paserk_seal_v4(self):
 
         for v in webtoken.json_loads(K4_SEAL)['tests']:
-            sk_ed25519 = bytes.fromhex(v["sealing-secret-key"])[0:32]
+            sk_ed25519 = bytes.fromhex(v['sealing-secret-key'])[0:32]
             unsealing_key = webtoken.ed25519_seed_to_x25519_private(sk_ed25519)
             sealing_key = webtoken.x25519_public_from_private(unsealing_key)
             
-            k = Key.from_paserk(v["paserk"], unsealing_key=unsealing_key)
-            k1 = Key.new("local", bytes.fromhex(v["unsealed"]))
+            k = Key.from_paserk(v['paserk'], unsealing_key=unsealing_key)
+            k1 = Key.new('local', bytes.fromhex(v['unsealed']))
             wpk = k1.to_paserk(sealing_key=sealing_key)
             k2 = Key.from_paserk(wpk, unsealing_key=unsealing_key)
             assert k1.key_bytes == k2.key_bytes
 
-            t = webtoken.paseto_encode(k, b"Hello world!")
+            t = webtoken.paseto_encode(k, b'Hello world!')
             d = webtoken.paseto_decode(k, t)
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d.payload == d1.payload == d2.payload == b"Hello world!"
+            assert d.payload == d1.payload == d2.payload == b'Hello world!'
 
-            t = webtoken.paseto_encode(k1, b"Hello world!")
+            t = webtoken.paseto_encode(k1, b'Hello world!')
             d1 = webtoken.paseto_decode(k1, t)
             d2 = webtoken.paseto_decode(k2, t)
-            assert d1.payload == d2.payload == b"Hello world!"
+            assert d1.payload == d2.payload == b'Hello world!'
 
             d = webtoken.paseto_decode(k, t)
-            assert d.payload == b"Hello world!"
+            assert d.payload == b'Hello world!'
 
 
 
