@@ -1,5 +1,6 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use std::time::{SystemTime, UNIX_EPOCH};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use std::collections::HashSet;
 
 use serde::{Serialize, Deserialize};
@@ -55,31 +56,48 @@ struct ParsedJws {
 // -- Helpers 
 
 fn current_time() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as f64
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64()
 }
+
 
 pub fn get_numeric_date(v: &Value) -> Option<f64> {
-    v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    if let Some(f) = v.as_f64() {
+        return Some(f);
+    }
+    if let Some(s) = v.as_str() {
+        // parsing as a raw float - JWT
+        if let Ok(f) = s.parse::<f64>() {
+            return Some(f);
+        }
+        // parsing as RFC3339 / ISO 8601 - PASETO format
+        if let Ok(dt) = OffsetDateTime::parse(s, &Rfc3339) {
+            return Some(dt.unix_timestamp_nanos() as f64 / 1_000_000_000.0);
+        }
+    }
+    None
 }
 
+
 fn check_numeric_claims(claims: &Value) -> Result<(), WebtokenError> {
+
     for (claim, err_msg) in [
         ("exp", "exp must be a number"),
         ("iat", "iat must be a number"),
         ("nbf", "nbf must be a number"),
     ] {
         if let Some(val) = claims.get(claim) {
-            if !val.is_number() && val.as_str().and_then(|s| s.parse::<f64>().ok()).is_none() {
+            if get_numeric_date(val).is_none() {
                 if claim == "iat" {
-                     return Err(WebtokenError::InvalidIssuedAt(err_msg.into()));
+                    return Err(WebtokenError::InvalidIssuedAt(err_msg.into()));
                 } else {
-                     return Err(WebtokenError::DecodeError(err_msg.into()));
+                    return Err(WebtokenError::DecodeError(err_msg.into()));
                 }
             }
         }
     }
     Ok(())
 }
+
 
 pub fn sort_map(map: &mut Map<String, Value>) {
     let mut entries: Vec<(String, Value)> = std::mem::take(map).into_iter().collect();

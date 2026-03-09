@@ -843,7 +843,7 @@ class Token:
 
 def paseto_encode(
     key: bytes | str, 
-    payload: str, 
+    payload: bytes | str | dict, 
     purpose: str | None=None, 
     footer: str | bytes | dict=None, 
     implicit_assertion=None, 
@@ -867,19 +867,12 @@ def paseto_encode(
     else:
         key_material = key
 
-    if purpose == 'secret' and isinstance(key_material, bytes) and len(key_material) == 64:
-        key_material = key_material[:32]
-
-    # The Key object sets purpose='secret' for private keys for compat
-    # but rust's paseto_encode match block expects 'public' to trigger sign_v4_public
-    purpose = 'public' if purpose == 'secret' else purpose
-
     if isinstance(payload, dict):
         now = datetime.now(tz=timezone.utc)
         if add_iat and 'iat' not in payload:
-            payload['iat'] = now.isoformat(timespec='seconds')
+            payload['iat'] = now.isoformat()
         if exp_seconds is not None and 'exp' not in payload:
-            payload['exp'] = (now + timedelta(seconds=exp_seconds)).isoformat(timespec='seconds')
+            payload['exp'] = (now + timedelta(seconds=exp_seconds)).isoformat()
     
     if not hasattr(serializer, 'dumps') or not callable(getattr(serializer, 'dumps')):
         raise ValueError('serializer should have dumps()')
@@ -912,15 +905,16 @@ def paseto_decode(
     leeway: int = 0,
     validate_claims: bool = True,
     aud: str | list | None = None,  
+    iss: str | list | None = None, 
+    sub: str | None = None,
 ) -> Token:
 
     if isinstance(key, list):
         errors = []
         for k in key:
             try:
-                print(f'{deserializer=}')
                 return paseto_decode(
-                    k, token, purpose, implicit_assertion, deserializer, leeway, validate_claims, aud
+                    k, token, purpose, implicit_assertion, deserializer, leeway, validate_claims, aud, iss, sub
                 )
             except Exception as e:
                 errors.append(e)
@@ -929,34 +923,15 @@ def paseto_decode(
         # none of the keys worked
         raise ValueError('key is not found for verifying the token' + (f'\n- {errors}' if errors else ''))
 
-    if hasattr(key, 'key_bytes'):
-        key_material = key.key_bytes
-        purpose = purpose or getattr(key, 'purpose', 'local')
-    else:
-        key_material = key
-
-    # If the user passed a secret key to decode, we provide the public half
-    if purpose == 'secret' and isinstance(key_material, bytes):
-        if len(key_material) == 64:
-            # PASERK unwrapped key: [32-byte seed][32-byte public key]
-            key_material = key_material[32:]
-        elif len(key_material) == 32:
-            # Raw 32-byte seed - derive the public key for us
-            key_material = rust_lib.ed25519_public_from_seed(key_material)
-
-    if isinstance(key_material, bytes) and len(key_material) != 32:
-        raise ValueError('key is not found for verifying the token')
-
-    token = token.decode('utf-8') if isinstance(token, bytes) else token
-
     try:
-        payload, footer = rust_lib.paseto_decode(
-            key_material, token, purpose='public' if purpose == 'secret' else purpose, implicit_assertion=implicit_assertion
-            )
+        payload, footer = rust_lib.paseto_decode(key, token, purpose=purpose, implicit_assertion=implicit_assertion)
     except ValueError as e:
         if 'too short' in str(e).lower():
             raise ValueError('Invalid payload')
+        if str(e) == "DecryptError":
+            raise DecryptError('Failed to decrypt')
 
+        actual_purpose = purpose or getattr(key, 'purpose', 'local')
         raise DecryptError('Failed to decrypt') if purpose == 'local' else ValueError(str(e))
 
 
@@ -976,46 +951,43 @@ def paseto_decode(
             pass
     
     if isinstance(payload, dict) and validate_claims:
+        options = {
+            'verify_exp': True,
+            'verify_nbf': True,
+            'verify_iat': True,
+            'verify_aud': aud is not None,
+            'verify_iss': iss is not None,
+            'verify_sub': sub is not None,
+        }
 
-        now = datetime.now(tz=timezone.utc)
-        
-        # Check Expiration 
-        if 'exp' in payload:
-            try:
-                exp_time = datetime.fromisoformat(payload['exp'])
-            except (ValueError, TypeError):
-                raise VerifyError('Invalid exp')
+        try:
+            rust_lib.validate_claims(
+                payload, options=options, audience=aud, issuer=iss, subject=sub, verify=True, leeway=float(leeway)
+            )
+        except ExpiredSignatureError:
+            raise VerifyError("Token has expired")
+        except ImmatureSignatureError:
+            raise VerifyError("Token is not yet valid")
+        except InvalidAudienceError:
+            raise VerifyError("aud verification failed")
+        except InvalidIssuerError:
+            raise VerifyError("iss verification failed")
+        except InvalidSubjectError:
+            raise VerifyError("sub verification failed")
+        except rust_lib.MissingRequiredClaimError as e:
+            raise VerifyError("aud verification failed" if 'aud' in str(e) else 
+                "iss verification failed" if 'iss' in str(e) else str(e))
 
-            if now > exp_time + timedelta(seconds=leeway):
-                raise VerifyError('Token has expired')
+        except DecodeError as e:
+            err_str = str(e)
+            if "must be a number" in err_str:
+                claim = err_str.split()[0]
+                raise VerifyError(f"Invalid {claim}")
+            raise VerifyError(err_str)
+        except Exception as e:
+            raise VerifyError(str(e))
                 
-        # Check Not Before 
-        if 'nbf' in payload:
-            try:
-                nbf_time = datetime.fromisoformat(payload['nbf'])
-            except (ValueError, TypeError):
-                raise VerifyError('Invalid nbf')
-
-            if now < nbf_time - timedelta(seconds=leeway):
-                raise VerifyError('Token is not yet valid')
-
-        if aud is not None:
-            if 'aud' not in payload:
-                raise VerifyError('aud verification failed')
-            
-            # The token's audience might be a single string or a list of strings
-            token_aud = payload['aud']
-            if isinstance(token_aud, str):
-                token_aud = [token_aud]
-                
-            # The expected audience might be a single string or a list of strings
-            expected_aud = [aud] if isinstance(aud, str) else aud
-            
-            # Check if there is any overlap between the expected and actual audiences
-            if not any(a in token_aud for a in expected_aud):
-                raise VerifyError('aud verification failed')
-                
-    purpose = token.split('.')[1]
+    purpose = token.split(b'.' if isinstance(token, bytes) else '.')[1]
 
     return Token(payload, footer, purpose)
 

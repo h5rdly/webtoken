@@ -891,6 +891,15 @@ fn load_key_from_pem(key_data: BytesOrString) -> PyResult<PyJWK> {
 fn paseto_encode(key: BytesOrString, payload: &Bound<'_, PyAny>, purpose: &str, footer: Option<&[u8]>,
     implicit_assertion: Option<&[u8]>, nonce: Option<&[u8]>) -> PyResult<String> {
 
+    let mut key_bytes = key.as_bytes().to_vec();
+
+    if purpose == "secret" && key_bytes.len() == 64 {
+        key_bytes = key_bytes[..32].to_vec();
+    }
+    
+    // Map secret purpose to public for the underlying engine
+    let actual_purpose = if purpose == "secret" { "public" } else { purpose };
+
     let payload_bytes: Vec<u8> = if let Ok(py_bytes) = payload.cast::<pyo3::types::PyBytes>() {
         py_bytes.as_bytes().to_vec()
     } else {
@@ -899,13 +908,13 @@ fn paseto_encode(key: BytesOrString, payload: &Bound<'_, PyAny>, purpose: &str, 
         serde_json::to_vec(&val).map_err(|_| PyValueError::new_err("JSON encoding failed"))?
     };
 
-    match purpose {
+    match actual_purpose {
         "local" => {
-            paseto::encrypt_v4_local(&payload_bytes, key.as_bytes(), footer, implicit_assertion, nonce)
+            paseto::encrypt_v4_local(&payload_bytes, &key_bytes, footer, implicit_assertion, nonce)
                 .map_err(|e| PyValueError::new_err(format!("{}", e)))
         },
         "public" => {
-            paseto::sign_v4_public(&payload_bytes, key.as_bytes(), footer, implicit_assertion)
+            paseto::sign_v4_public(&payload_bytes, &key_bytes, footer, implicit_assertion)
                 .map_err(|e| PyValueError::new_err(format!("{}", e)))
         },
         _ => Err(PyValueError::new_err("Purpose must be 'local' or 'public'"))
@@ -914,17 +923,91 @@ fn paseto_encode(key: BytesOrString, payload: &Bound<'_, PyAny>, purpose: &str, 
 
 
 #[pyfunction]
-#[pyo3(signature = (key, token, purpose="local", implicit_assertion=None))]
-fn paseto_decode<'py>(py: Python<'py>, key: BytesOrString, token: &str, purpose: &str, implicit_assertion: Option<&[u8]>
-) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyBytes>)>{
+#[pyo3(signature = (key, token, purpose=None, implicit_assertion=None))]
+fn paseto_decode<'py>(
+    py: Python<'py>, 
+    key: &Bound<'py, PyAny>, 
+    token: BytesOrString,
+    purpose: Option<BytesOrString>,
+    implicit_assertion: Option<&[u8]>
+) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyBytes>)> {
 
-    let (payload_bytes, footer) = match purpose {
+    // 1. Mimic Python's "falsy" evaluation (if empty, treat as None)
+    let purpose_is_empty = match &purpose {
+        Some(BytesOrString::Str(s)) => s.is_empty(),
+        Some(BytesOrString::Bytes(b)) => b.is_empty(),
+        None => true,
+    };
+
+    let mut actual_purpose = match &purpose {
+        Some(BytesOrString::Str(s)) if !s.is_empty() => s.clone(),
+        Some(BytesOrString::Bytes(b)) if !b.is_empty() => from_utf8(b).unwrap_or("local").to_string(),
+        _ => "local".to_string(), // Default fallback
+    };
+
+    // 2. Extract key and track its original type
+    let mut key_bytes: Vec<u8>;
+    let enforce_length: bool;
+
+    if let Ok(kb) = key.getattr("key_bytes") {
+        key_bytes = kb.extract::<Vec<u8>>()?;
+        enforce_length = true; // Custom Key objects always contain raw bytes
+        
+        // Fallback to the object's purpose if None/Empty was passed
+        if purpose_is_empty {
+            if let Ok(p) = key.getattr("purpose") {
+                if let Ok(p_str) = p.extract::<String>() {
+                    actual_purpose = p_str;
+                }
+            }
+        }
+    } else if let Ok(b) = key.extract::<Vec<u8>>() {
+        key_bytes = b;
+        enforce_length = true; // Explicitly passed as raw bytes
+    } else if let Ok(s) = key.extract::<String>() {
+        key_bytes = s.into_bytes();
+        enforce_length = false; // Strings (like PASERK) bypass the length check
+    } else {
+        return Err(PyTypeError::new_err("key must be bytes, str, or Key object"));
+    }
+
+    // 3. Token extraction
+    let token_str = match token {
+        BytesOrString::Str(s) => s,
+        BytesOrString::Bytes(b) => from_utf8(&b).map_err(|_| PyValueError::new_err("Invalid UTF-8 in token"))?.to_string(),
+    };
+
+    // 4. Length Validation (matching the old Python isinstance check)
+    if enforce_length && key_bytes.len() != 32 && key_bytes.len() != 64 {
+        return Err(PyValueError::new_err("key is not found for verifying the token"));
+    }
+
+    // 5. Handle public-key derivation natively in Rust
+    if actual_purpose == "secret" {
+        if key_bytes.len() == 64 {
+            key_bytes = key_bytes[32..].to_vec(); 
+        } else if key_bytes.len() == 32 {
+            key_bytes = crypto::ed25519_public_from_seed(&key_bytes)
+                .map_err(|_| PyValueError::new_err("Invalid Ed25519 seed"))?;
+        }
+    }
+    
+    let engine_purpose = if actual_purpose == "secret" { "public" } else { actual_purpose.as_str() };
+
+    // 6. Decrypt or Verify
+    let (payload_bytes, footer) = match engine_purpose {
         "local" => {
-             paseto::decrypt_v4_local(token, key.as_bytes(), implicit_assertion)
-                .map_err(|e| PyValueError::new_err(format!("{}", e)))?
+             paseto::decrypt_v4_local(&token_str, &key_bytes, implicit_assertion)
+                .map_err(|e| {
+                    if let WebtokenError::InvalidSignature = e {
+                        PyValueError::new_err("DecryptError") 
+                    } else {
+                        PyValueError::new_err(format!("{}", e))
+                    }
+                })?
         },
         "public" => {
-             paseto::verify_v4_public(token, key.as_bytes(), implicit_assertion)
+             paseto::verify_v4_public(&token_str, &key_bytes, implicit_assertion)
                 .map_err(|e| PyValueError::new_err(format!("{}", e)))?
         },
         _ => return Err(PyValueError::new_err("Purpose must be 'local' or 'public'"))
