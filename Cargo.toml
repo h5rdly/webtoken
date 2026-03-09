@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 [dependencies]
 
 # Main Crypto BE
-aws-lc-rs = { version = "=1.15.4", features = ["unstable"] }   # ML-DSA-65 is currently supported on the unstable branch
+aws-lc-rs = { version = "=1.16.1" }  
 
 # Aux Crypto
 graviola = "0.3"
