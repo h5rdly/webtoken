@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "webtoken"
-version = "0.5.0"
+version = "0.6.0"
 description = "A Rust-backed JWT library"
 readme = "README.md"
 requires-python = ">=3.12"

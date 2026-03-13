@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 [dependencies]
 
 # Main Crypto BE
-aws-lc-rs = { version = "=1.15.4", features = ["unstable"] }   # ML-DSA-65 is currently supported on the unstable branch
+aws-lc-rs = { version = "=1.16.1" }  
 
 # Aux Crypto
 graviola = "0.3"
@@ -35,7 +35,7 @@ pythonize = "0.28"
 
 [dependencies.pyo3]
 version = "0.28" 
-features = ["extension-module", "abi3-py311", "py-clone", "time"] 
+features = ["extension-module", "abi3-py312", "py-clone", "time"] 
 
 
 
