@@ -4,7 +4,7 @@ use pyo3::types::PyBytes;
 use pyo3::exceptions::PyValueError;
 
 // [GRAVIOLA] - Used for XChaCha20 and HMAC
-use graviola::aead::XChaCha20Poly1305;
+use graviola::aead::{XChaCha20Poly1305, ChaCha20Poly1305};
 use graviola::hashing::{Sha256, Sha384, Sha512, Hash, HashContext, hmac::Hmac}; 
 
 // [Key Agreement]
@@ -356,6 +356,49 @@ pub fn aes_gcm_decrypt(key: &[u8], nonce: &[u8], ciphertext: &[u8], tag: &[u8], 
     Ok(plaintext_slice.to_vec())
 }
 
+pub fn c20p_encrypt(key: &[u8], nonce_opt: Option<&[u8]>, plaintext: &[u8], aad: &[u8]
+    ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), WebtokenError> {
+    
+    let key_arr: [u8; 32] = key.try_into().map_err(|_| 
+        WebtokenError::InvalidKey("C20P requires a 32-byte key".into())
+    )?;
+
+    let nonce_vec = if let Some(n) = nonce_opt {
+        if n.len() != 12 { return Err(WebtokenError::InvalidToken("C20P Nonce must be 12 bytes".into())); }
+        n.to_vec()
+    } else {
+        get_random_bytes(12)?
+    };
+
+    let nonce_arr: [u8; 12] = nonce_vec.clone().try_into().unwrap();
+    let cipher = ChaCha20Poly1305::new(key_arr);
+    
+    let mut buffer = plaintext.to_vec();
+    let mut tag = [0u8; 16];
+    
+    cipher.encrypt(&nonce_arr, aad, &mut buffer, &mut tag);
+    
+    Ok((buffer, tag.to_vec(), nonce_vec))
+}
+
+
+pub fn c20p_decrypt(key: &[u8], nonce: &[u8], ciphertext: &[u8], tag: &[u8], aad: &[u8]
+    ) -> Result<Vec<u8>, WebtokenError> {
+    
+    let key_arr: [u8; 32] = key.try_into().map_err(|_| WebtokenError::InvalidKey("C20P requires a 32-byte key".into()))?;
+    let nonce_arr: [u8; 12] = nonce.try_into().map_err(|_| WebtokenError::Generic("C20P Nonce must be 12 bytes".into()))?;
+    let tag_arr: [u8; 16] = tag.try_into().map_err(|_| WebtokenError::Generic("C20P Tag must be 16 bytes".into()))?;
+
+    let cipher = ChaCha20Poly1305::new(key_arr);
+    let mut buffer = ciphertext.to_vec();
+    
+    if cipher.decrypt(&nonce_arr, aad, &mut buffer, &tag_arr).is_err() {
+        return Err(WebtokenError::InvalidSignature);
+    }
+    
+    Ok(buffer)
+}
+
 // ============================================================================
 //  AEAD (XChaCha20 - Graviola)
 // ============================================================================
@@ -370,12 +413,9 @@ pub fn encrypt_xchacha20_detached(key: &[u8; 32], nonce: &[u8; 24], plaintext: &
 }
 
 
-pub fn encrypt_xchacha20(
-    key: &[u8], 
-    plaintext: &[u8], 
-    aad: &[u8],
-    nonce_opt: Option<&[u8]> // New argument
+pub fn encrypt_xchacha20(key: &[u8], plaintext: &[u8], aad: &[u8], nonce_opt: Option<&[u8]> 
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), WebtokenError> {
+
     let key_arr: [u8; XCHACHA_KEY_LEN] = key.try_into().map_err(|_|
         WebtokenError::InvalidKey(format!("XChaCha20 requires a {XCHACHA_KEY_LEN}-byte key"))
     )?;
@@ -390,24 +430,29 @@ pub fn encrypt_xchacha20(
     
     let nonce_arr: [u8; 24] = nonce_vec.clone().try_into().unwrap();
     let (ciphertext, tag) = encrypt_xchacha20_detached(&key_arr, &nonce_arr, plaintext, aad)?;
+
     Ok((ciphertext, tag, nonce_vec))
 }
 
 
 pub fn decrypt_xchacha20_detached(key: &[u8; 32], nonce: &[u8; 24], ciphertext: &[u8], tag: &[u8; 16], aad: &[u8]
 ) -> Result<Vec<u8>, WebtokenError> {
+
     let cipher = XChaCha20Poly1305::new(*key);
     let mut buffer = ciphertext.to_vec();
     if cipher.decrypt(nonce, aad, &mut buffer, tag).is_err() {
         return Err(WebtokenError::InvalidSignature);
     }
+
     Ok(buffer)
 }
 
 pub fn decrypt_xchacha20(key: &[u8], ciphertext: &[u8], aad: &[u8], nonce: &[u8], tag: &[u8]) -> Result<Vec<u8>, WebtokenError> {
+    
     let key_arr: [u8; XCHACHA_KEY_LEN] = key.try_into().map_err(|_| WebtokenError::InvalidKey("Invalid key".into()))?;
     let nonce_arr: [u8; XCHACHA_NONCE_LEN] = nonce.try_into().map_err(|_| WebtokenError::Generic("Invalid nonce".into()))?;
     let tag_arr: [u8; TAG_LEN] = tag.try_into().map_err(|_| WebtokenError::Generic("Invalid tag".into()))?;
+    
     decrypt_xchacha20_detached(&key_arr, &nonce_arr, ciphertext, &tag_arr, aad)
 }
 
@@ -1105,6 +1150,28 @@ pub fn ed25519_seed_to_x25519_private(seed: &[u8]) -> PyResult<Vec<u8>> {
 }
 
 
+#[pyfunction]
+#[pyo3(signature = (key, plaintext, aad=None, nonce=None))]
+fn encrypt_xc20p<'py>(
+    py: Python<'py>, key: &[u8], plaintext: &[u8], aad: Option<&[u8]>, nonce: Option<&[u8]>
+) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+    let (ciphertext, tag, _) = encrypt_xchacha20(key, plaintext, aad.unwrap_or(b""), nonce)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok((PyBytes::new(py, &ciphertext), PyBytes::new(py, &tag)))
+}
+
+
+#[pyfunction]
+#[pyo3(signature = (key, ciphertext, tag, aad=None, nonce=None))]
+fn decrypt_xc20p<'py>(
+    py: Python<'py>, key: &[u8], ciphertext: &[u8], tag: &[u8], aad: Option<&[u8]>, nonce: Option<&[u8]>
+) -> PyResult<Bound<'py, PyBytes>> {
+    let plaintext = decrypt_xchacha20(key, ciphertext, aad.unwrap_or(b""), nonce.unwrap_or(b""), tag)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(PyBytes::new(py, &plaintext))
+}
+
+
 pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(digest, m)?)?;
     m.add_function(wrap_pyfunction!(load_pem_private_key, m)?)?;
@@ -1125,6 +1192,8 @@ pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(x25519_derive_py, m)?)?;
     m.add_function(wrap_pyfunction!(paseto_v4_encrypt_py, m)?)?;
     m.add_function(wrap_pyfunction!(paseto_v4_decrypt_py, m)?)?;
+    m.add_function(wrap_pyfunction!(encrypt_xc20p, m)?)?;
+    m.add_function(wrap_pyfunction!(decrypt_xc20p, m)?)?;
     
     Ok(())
 }

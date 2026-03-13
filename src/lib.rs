@@ -732,54 +732,45 @@ fn decode<'py>(
 }
 
 
-#[pyfunction]
-#[pyo3(signature = (payload, key, alg="dir", enc="XC20P", extra_headers=None))]
-fn encrypt(payload: BytesOrString, key: &[u8], alg: &str, enc: &str, extra_headers: Option<String>) -> PyResult<String> {
-    
-    // Construct the protected header
-    let mut protected_header = serde_json::json!({
-        "alg": alg,
-        "enc": enc,
-        "typ": "JWT"
-    });
-
-    // Merge extra headers if provided
-    if let Some(extra_json) = extra_headers {
-        if let Ok(extra) = serde_json::from_str::<serde_json::Value>(&extra_json) {
-            if let Some(obj) = protected_header.as_object_mut() {
-                if let Some(extra_obj) = extra.as_object() {
-                    for (k, v) in extra_obj {
-                        obj.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-        }
+fn get_jwe_key_bytes(key: &Bound<'_, PyAny>, is_public_only: bool) -> PyResult<Vec<u8>> {
+    if let Ok(jwk) = key.extract::<PyJWK>() {
+        return jwk.to_key_bytes(is_public_only).map_err(PyErr::from);
     }
-
-    jwe::encrypt_compact(&protected_header, payload.as_bytes(), key).map_err(PyErr::from)
+    if let Ok(b) = key.extract::<Vec<u8>>() { return Ok(b); }
+    if let Ok(s) = key.extract::<String>() { return Ok(s.into_bytes()); }
+    Err(PyTypeError::new_err("JWE key must be bytes, str (PEM), or a PyJWK object"))
 }
 
 
 #[pyfunction]
-fn decrypt<'py>(py: Python<'py>, token: &str, key: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-    let payload = jwe::decrypt_compact(token, key).map_err(PyErr::from)?;
-    Ok(PyBytes::new(py, &payload))
-}
-
-
-#[pyfunction]
-#[pyo3(signature = (protected, payload, key))]
-fn encrypt_compact(protected: String, payload: &[u8], key: &[u8]) -> PyResult<String> {
-    let headers: serde_json::Value = serde_json::from_str(&protected)
-        .map_err(|e| PyValueError::new_err(format!("Invalid JSON headers: {}", e)))?;
+#[pyo3(signature = (protected_header, payload, key))]
+fn encrypt_compact<'py>(
+    protected_header: &Bound<'py, PyDict>, 
+    payload: BytesOrString, 
+    key: &Bound<'py, PyAny>
+) -> PyResult<String> {
+    
+    let header_val: serde_json::Value = pythonize::depythonize(protected_header)
+        .map_err(|e| PyValueError::new_err(format!("Invalid header: {}", e)))?;
         
-    jwe::encrypt_compact(&headers, payload, key).map_err(PyErr::from)
+    let key_bytes = get_jwe_key_bytes(key, true)?;
+
+    crate::jwe::encrypt_compact(&header_val, payload.as_bytes(), &key_bytes)
+        .map_err(PyErr::from)
 }
 
 
 #[pyfunction]
-fn decrypt_compact<'py>(py: Python<'py>, token: &str, key: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-    let payload = jwe::decrypt_compact(token, key).map_err(PyErr::from)?;
+#[pyo3(signature = (token, key))]
+fn decrypt_compact<'py>(
+    py: Python<'py>, 
+    token: &str, 
+    key: &Bound<'py, PyAny>
+) -> PyResult<Bound<'py, PyBytes>> {
+    
+    let key_bytes = get_jwe_key_bytes(key, false)?;
+    let payload = crate::jwe::decrypt_compact(token, &key_bytes).map_err(PyErr::from)?;
+        
     Ok(PyBytes::new(py, &payload))
 }
 
@@ -1201,8 +1192,6 @@ fn _webtoken(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(unregister_algorithm, m)?)?;
     m.add_function(wrap_pyfunction!(validate_claims, m)?)?;
 
-    m.add_function(wrap_pyfunction!(encrypt, m)?)?;
-    m.add_function(wrap_pyfunction!(decrypt, m)?)?;
     m.add_function(wrap_pyfunction!(encrypt_compact, m)?)?;
     m.add_function(wrap_pyfunction!(decrypt_compact, m)?)?;
     m.add_function(wrap_pyfunction!(paseto_encode, m)?)?;  

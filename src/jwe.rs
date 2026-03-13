@@ -134,6 +134,10 @@ fn encrypt_content(enc: &str, cek: &[u8], payload: &[u8], aad: &[u8]) -> Result<
         "XC20P" => {
             crypto::encrypt_xchacha20(cek, payload, aad, None)
         },
+        "C20P" => {
+            let (ciphertext, tag, nonce) = crypto::c20p_encrypt(cek, None, payload, aad)?;
+            Ok((ciphertext, tag, nonce))
+        },
         "A128CBC-HS256" | "A192CBC-HS384" | "A256CBC-HS512" => {
             // Composite Logic: [ MAC_KEY | ENC_KEY ]
             let key_len = cek.len() / 2;
@@ -179,6 +183,9 @@ fn decrypt_content(enc: &str, cek: &[u8], ciphertext: &[u8], aad: &[u8], nonce: 
         "XC20P" => {
             crypto::decrypt_xchacha20(cek, ciphertext, aad, nonce, tag)
         },
+        "C20P" => {
+            crypto::c20p_decrypt(cek, nonce, ciphertext, tag, aad)
+        },
         "A128CBC-HS256" | "A192CBC-HS384" | "A256CBC-HS512" => {
             // Composite Logic
             let key_len = cek.len() / 2;
@@ -203,27 +210,22 @@ fn decrypt_content(enc: &str, cek: &[u8], ciphertext: &[u8], aad: &[u8], nonce: 
             let full_tag = crypto::hmac_sign(mac_key, &mac_input, hmac_alg)?;
             let expected_tag = &full_tag[0..full_tag.len()/2];
 
-            // Constant time comparison (using simple slice compare here, in prod use constant_time_eq)
+            // Constant time comparison (todo - switch to constant_time_eq)
             if tag != expected_tag {
                 return Err(WebtokenError::InvalidSignature);
             }
 
-            // Decrypt
             crypto::aes_cbc_decrypt(enc_key, nonce, ciphertext)
         },
         _ => Err(WebtokenError::UnsupportedAlgorithm(format!("Unknown enc: {enc}").into()))
     }
 }
 
-// ============================================================================
-//  High Level API
-// ============================================================================
 
-pub fn encrypt_compact(
-    protected: &Value,
-    payload: &[u8],
-    key: &[u8]
-) -> Result<String, WebtokenError> {
+// --  API
+
+pub fn encrypt_compact(protected: &Value, payload: &[u8], key: &[u8]) -> Result<String, WebtokenError> {
+    
     // 1. Prepare Header
     let alg = protected["alg"].as_str().ok_or(WebtokenError::InvalidToken("Missing alg".into()))?.to_string();
     let enc = protected["enc"].as_str().ok_or(WebtokenError::InvalidToken("Missing enc".into()))?.to_string();
@@ -298,7 +300,7 @@ fn get_cek_length(enc: &str) -> Result<usize, WebtokenError> {
     match enc {
         "A128GCM" => Ok(16),
         "A192GCM" => Ok(24),
-        "A256GCM" | "XC20P" => Ok(32),
+        "A256GCM" | "XC20P" | "C20P" => Ok(32),
         "A128CBC-HS256" => Ok(32), // 16 MAC + 16 ENC
         "A192CBC-HS384" => Ok(48), // 24 MAC + 24 ENC
         "A256CBC-HS512" => Ok(64), // 32 MAC + 32 ENC
