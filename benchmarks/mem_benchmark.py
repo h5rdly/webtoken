@@ -26,4 +26,4 @@ for mod in ("jwt", "webtoken"):
     if result.returncode:
         print(f"Error running {mod}: {result.stderr.strip()}")
     else:
-        print(f"{mod:>10}: {result.stdout.strip()} MB")
+        print(f"{mod}: {' ' * (10 -len(mod))} {result.stdout.strip()} MB")
