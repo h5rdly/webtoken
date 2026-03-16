@@ -7,7 +7,16 @@
 
 ##  Size
 
-The `.so` size on linux is ~3.9Mb, no external dependencies.
+The `.so` size on linux is ~`3.9Mb`, no external dependencies.
+
+Simple RAM usage [benchmark](https://github.com/h5rdly/webtoken/blob/main/benchmarks/mem_benchmark.py) -
+
+```
+RAM Footprint on Import (Native Linux /proc/self/status):
+
+jwt:         17.54 MB
+webtoken:    5.14 MB
+```
 
 ##  Speed
 
