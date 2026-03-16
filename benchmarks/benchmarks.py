@@ -79,7 +79,7 @@ def benchmark(iterations=100):
     
     # Standard
     compare_algo("HS256", is_symmetric=True)
-    for algo in "RS256", "ES256", "EdDSA", "ES512", "ES256K": #, "ML-DSA-65":
+    for algo in "RS256", "RS512", "ES256", "EdDSA", "ES512", "ES256K": #, "ML-DSA-65":
         compare_algo(algo)
 
 
