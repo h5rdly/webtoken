@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 aws-lc-rs = { version = "=1.16.1" }  
 
 # Aux Crypto
-graviola = "0.3"
+graviola = "0.4"
 blake2b_simd = "1.0.2"
 chacha20 = "0.9"
 argon2 = "0.5"
