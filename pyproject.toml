@@ -13,7 +13,7 @@ requires-python = ">=3.12"
 Homepage = "https://github.com/h5rdly/webtoken/wiki"
 
 [tool.maturin]
-features = ["pyo3/extension-module", "pyo3/abi3-py312"]
+features = ["pyo3/extension-module", "pyo3/abi3-py312", "pyo3/abi3t"]
 module-name = "webtoken._webtoken"
 
 # Ignore "key too short" warnings when running tests
