@@ -35,7 +35,7 @@ pythonize = "0.29"
 
 [dependencies.pyo3]
 version = "0.29" 
-features = ["extension-module", "abi3-py312", "py-clone", "time"] 
+features = ["extension-module", "abi3-py312", "abi3t", "py-clone", "time"] 
 
 
 
