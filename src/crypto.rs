@@ -6,6 +6,7 @@ use pyo3::exceptions::PyValueError;
 // [GRAVIOLA] - Used for XChaCha20 and HMAC
 use graviola::aead::{XChaCha20Poly1305, ChaCha20Poly1305};
 use graviola::hashing::{Sha256, Sha384, Sha512, Hash, HashContext, hmac::Hmac}; 
+use graviola::signing::eddsa::{Ed25519SigningKey, Ed25519VerifyingKey};
 
 // [Key Agreement]
 use graviola::key_agreement::x25519::{StaticPrivateKey, PublicKey as X25519PublicKey};
@@ -36,7 +37,7 @@ use aws_lc_rs::rsa::{
 
 // [AWS-LC-RS] Signatures
 use aws_lc_rs::signature::{
-    KeyPair, EcdsaKeyPair, RsaKeyPair, Ed25519KeyPair,
+    KeyPair, EcdsaKeyPair, RsaKeyPair,
     ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P384_SHA384_FIXED_SIGNING,
     ECDSA_P521_SHA512_FIXED_SIGNING, ECDSA_P256K1_SHA256_FIXED_SIGNING,
     ECDSA_P256_SHA256_FIXED, ECDSA_P384_SHA384_FIXED,
@@ -45,7 +46,7 @@ use aws_lc_rs::signature::{
     RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512,
     RSA_PKCS1_SHA256, RSA_PKCS1_SHA384, RSA_PKCS1_SHA512,
     RSA_PSS_SHA256, RSA_PSS_SHA384, RSA_PSS_SHA512,
-    ED25519, UnparsedPublicKey
+    UnparsedPublicKey
 };
 use aws_lc_rs::encoding::AsDer;
 
@@ -478,8 +479,9 @@ pub fn x25519_public_from_private(private_key_bytes: &[u8]) -> Result<Vec<u8>, W
 }
 
 pub fn ed25519_public_from_seed(seed: &[u8]) -> Result<Vec<u8>, WebtokenError> {
-    let pair = Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| WebtokenError::InvalidKey("Invalid Ed25519 seed".into()))?;
-    Ok(pair.public_key().as_ref().to_vec())
+    let key = Ed25519SigningKey::from_bytes(seed)
+        .map_err(|_| WebtokenError::InvalidKey("Invalid Ed25519 seed".into()))?;
+    Ok(key.public_key().as_bytes().to_vec())
 }
 
 pub fn hkdf_sha256(secret: &[u8], salt: &[u8], info: &[u8], length: usize) -> Vec<u8> {
@@ -642,15 +644,18 @@ pub fn sign(alg: &str, key_data: &[u8], message: &[u8]) -> Result<Vec<u8>, Webto
         "ES512" => sign_aws_ec!(&ECDSA_P521_SHA512_FIXED_SIGNING),
         "ES256K" => sign_aws_ec!(&ECDSA_P256K1_SHA256_FIXED_SIGNING),
 
-        // [AWS-LC-RS] EdDSA
+        // [GRAVIOLA] EdDSA
         "EdDSA"|"Ed25519" => {
             let kp = if der.len() == 32 {
-                Ed25519KeyPair::from_seed_unchecked(&der).map_err(|_| WebtokenError::InvalidKey("Invalid Ed25519 seed".into()))?
+                Ed25519SigningKey::from_bytes(&der)
+                    .map_err(|_| WebtokenError::InvalidKey("Invalid Ed25519 seed".into()))?
             } else {
-                Ed25519KeyPair::from_pkcs8(&der).map_err(|_| WebtokenError::InvalidKey("Invalid Ed25519 PKCS8".into()))?
+                Ed25519SigningKey::from_pkcs8_der(&der)
+                    .map_err(|_| WebtokenError::InvalidKey("Invalid Ed25519 PKCS8".into()))?
             };
-            Ok(kp.sign(message).as_ref().to_vec())
+            Ok(kp.sign(message).to_vec())
         },
+
         _ => Err(WebtokenError::InvalidAlgorithm("Algorithm not supported".into())),
     }
 }
@@ -674,14 +679,17 @@ pub fn verify(alg: &str, key_data: &[u8], message: &[u8], signature: &[u8]) -> R
         "ES512" => { UnparsedPublicKey::new(&ECDSA_P521_SHA512_FIXED, &der).verify(message, signature).map_err(|_| WebtokenError::InvalidSignature) },
         "ES256K" => { UnparsedPublicKey::new(&ECDSA_P256K1_SHA256_FIXED, &der).verify(message, signature).map_err(|_| WebtokenError::InvalidSignature) },
 
+        // [GRAVIOLA] EdDSA
         "EdDSA"|"Ed25519" => {
-            if der.len() == 32 {
-                let mut spki = vec![0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
-                spki.extend_from_slice(&der);
-                UnparsedPublicKey::new(&ED25519, &spki).verify(message, signature).map_err(|_| WebtokenError::InvalidSignature)
+            let vk = if der.len() == 32 {
+                Ed25519VerifyingKey::from_bytes(&der)
+                    .map_err(|_| WebtokenError::InvalidKey("Invalid Ed25519 public key bytes".into()))?
             } else {
-                UnparsedPublicKey::new(&ED25519, &der).verify(message, signature).map_err(|_| WebtokenError::InvalidSignature)
-            }
+                Ed25519VerifyingKey::from_spki_der(&der)
+                    .map_err(|_| WebtokenError::InvalidKey("Invalid Ed25519 SPKI".into()))?
+            };
+            // argument order for Graviola: signature, message
+            vk.verify(signature, message).map_err(|_| WebtokenError::InvalidSignature)
         },
 
         _ => Err(WebtokenError::InvalidAlgorithm("Algorithm not supported".into())),
@@ -882,10 +890,20 @@ pub fn generate_key_pair(algorithm: &str, key_size: Option<usize>) -> PyResult<(
 
         // --- EdDSA (Ed25519) ---
         "EDDSA" | "ED25519" => {
-            let key = Ed25519KeyPair::generate().map_err(|_| PyValueError::new_err("Ed25519 Gen failed"))?;
+            let key = Ed25519SigningKey::generate()
+                .map_err(|_| PyValueError::new_err("Ed25519 Gen failed"))?;
+            
+            let mut pkcs8_buf = [0u8; 128];
+            let pkcs8_slice = key.to_pkcs8_der(&mut pkcs8_buf)
+                .map_err(|_| PyValueError::new_err("PKCS8 encode failed"))?;
+            
+            let mut spki_buf = [0u8; 128];
+            let spki_slice = key.public_key().to_spki_der(&mut spki_buf)
+                .map_err(|_| PyValueError::new_err("SPKI encode failed"))?;
+
             Ok((
-                to_pem("PRIVATE KEY", key.to_pkcs8v1().unwrap().as_ref()),
-                to_pem("PUBLIC KEY", key.public_key().as_der().unwrap().as_ref())
+                to_pem("PRIVATE KEY", pkcs8_slice),
+                to_pem("PUBLIC KEY", spki_slice)
             ))
         },
 

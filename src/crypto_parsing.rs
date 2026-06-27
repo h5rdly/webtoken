@@ -13,6 +13,7 @@ pub const OID_P384: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22];
 pub const OID_P521: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x23];
 pub const OID_SECP256K1: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x0A];
 pub const OID_RSA_ENCRYPTION: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+pub const OID_COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03]; // 2.5.4.3
 
 
 // ============================================================================
@@ -249,6 +250,74 @@ impl<'a> DerReader<'a> {
 }
 
 
+// ============================================================================
+//  X.509 Certificate Parsing
+// ============================================================================
+
+pub fn get_x509_subject_cn(der: &[u8]) -> Result<String, String> {
+
+    let mut cert = DerReader::new(der).read_sequence()?;
+    let mut tbs = cert.read_sequence()?; // TBSCertificate
+
+    // Skip Version if present (Context Specific Tag [0] == 0xA0)
+    let _ = tbs.read_optional_explicit(0)?;
+    // Skip Serial Number (INTEGER)
+    let _ = tbs.read_integer_bytes()?;
+    // Skip Signature Algorithm (SEQUENCE)
+    let _ = tbs.read_sequence()?;
+    // Skip Issuer (SEQUENCE)
+    let _ = tbs.read_sequence()?;
+    // Skip Validity (SEQUENCE)
+    let _ = tbs.read_sequence()?;
+
+    // Read Subject (SEQUENCE)
+    let mut subject = tbs.read_sequence()?;
+
+    // The Subject is a SEQUENCE of SETs of sequences (AttributeTypeAndValue)
+    while !subject.input.is_empty() {
+        let (tag, set_content) = subject.read_tag()?;
+        
+        // SET tag is 0x31
+        if tag != 0x31 { continue; } 
+        
+        let mut set_reader = DerReader::new(set_content);
+
+        while !set_reader.input.is_empty() {
+            let mut attr_seq = set_reader.read_sequence()?;
+            
+            if let Ok(oid) = attr_seq.read_oid() {
+                // If the OID matches the Common Name (CN) OID
+                if oid == OID_COMMON_NAME {
+                    // Extract the string tag and the raw bytes
+                    let (str_tag, string_content) = attr_seq.read_tag()?;
+                    
+                    // 0x1E is BMPString (UTF-16 Big Endian) - Common in Microsoft AD CS / Smart Cards
+                    if str_tag == 0x1E {
+                        if string_content.len() % 2 != 0 {
+                            return Err("Invalid BMPString length".into());
+                        }
+                        let utf16_data: Vec<u16> = string_content
+                            .chunks_exact(2)
+                            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                            .collect();
+                        
+                        return String::from_utf16(&utf16_data)
+                            .map_err(|_| "Invalid UTF-16 in Common Name".into());
+                    } 
+                    // 0x0C is UTF8String, 0x13 is PrintableString, 0x14 is TeletexString
+                    else {
+                        return String::from_utf8(string_content.to_vec())
+                            .map_err(|_| "Invalid UTF-8 in Common Name".into());
+                    }
+                }
+            }
+        }
+    }
+    
+    Err("Common Name (CN) not found in certificate".into())
+}
+
+
 pub fn oid_to_curve_info(oid_payload: &[u8]) -> Option<(&'static str, usize)> {
     match oid_payload {
         x if x == &OID_P256[2..] => Some(("P-256", 32)),
@@ -271,9 +340,16 @@ pub fn extract_ed25519_public_key_py(data: crate::BytesOrString) -> PyResult<Vec
     extract_ed25519_bytes(data.as_bytes()).map_err(|e| PyValueError::new_err(format!("{}", e)))
 }
 
+#[pyfunction(name = "get_x509_subject")]
+pub fn get_x509_subject_py(der_bytes: &[u8]) -> PyResult<String> {
+    get_x509_subject_cn(der_bytes).map_err(PyValueError::new_err)
+}
+
+
 pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
      m.add_function(wrap_pyfunction!(extract_ed25519_private_key_py, m)?)?;
      m.add_function(wrap_pyfunction!(extract_ed25519_public_key_py, m)?)?;
+     m.add_function(wrap_pyfunction!(get_x509_subject_py, m)?)?; 
 
      Ok(())
 }

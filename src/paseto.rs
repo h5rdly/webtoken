@@ -94,12 +94,11 @@ pub fn encode_paserk(
         let ak = Blake2bParams::new().hash_length(32).hash(&ak_msg);
         
         let mut n = [0u8; 24];
-        // Use aws-lc-rs for the XChaCha20 nonce as well
+        // Use aws-lc-rs for the ChaCha20 nonce as well
         rng.fill(&mut n).map_err(|_| WebtokenError::InvalidKey("RNG failed".into()))?;
         
-        use chacha20::{XChaCha20, cipher::{KeyIvInit, StreamCipher}};
         let mut edk = key_bytes.clone();
-        let mut cipher = XChaCha20::new(ek.as_bytes().into(), &n.into());
+        let mut cipher = XChaCha20::new_from_slices(ek.as_bytes(), &n).unwrap();
         cipher.apply_keystream(&mut edk);
         
         let mem = ((m_cost_kib as u64) * 1024).to_be_bytes();
@@ -167,9 +166,8 @@ pub fn encode_paserk(
         let n = Blake2bParams::new().hash_length(24).hash(&n_msg);
         
         // Encrypt the local key
-        use chacha20::{XChaCha20, cipher::{KeyIvInit, StreamCipher}};
         let mut edk = key_bytes.clone();
-        let mut cipher = XChaCha20::new(ek.as_bytes().into(), n.as_bytes().into());
+        let mut cipher = XChaCha20::new_from_slices(ek.as_bytes(), n.as_bytes()).unwrap();
         cipher.apply_keystream(&mut edk);
         
         // MAC Tag
@@ -211,7 +209,7 @@ pub fn encode_paserk(
 
         // Encrypt the raw key
         let mut c = key_bytes.to_vec();
-        let mut cipher = XChaCha20::new(&ek.into(), &n2.into());
+        let mut cipher = XChaCha20::new_from_slices(&ek, &n2).unwrap();
         cipher.apply_keystream(&mut c);
 
         // Generate the Tag
@@ -316,7 +314,7 @@ pub fn decode_paserk(
 
             // Decrypt
             let mut ptk = c.to_vec();
-            let mut cipher = XChaCha20::new(&ek.into(), &n2.into());
+            let mut cipher = XChaCha20::new_from_slices(&ek, &n2).unwrap();
             cipher.apply_keystream(&mut ptk);
 
             return Ok(ptk);
@@ -398,10 +396,9 @@ pub fn decode_paserk(
         ek_msg.extend_from_slice(&k);
         let ek = Blake2bParams::new().hash_length(32).hash(&ek_msg);
 
-        // Decrypt the payload using XChaCha20
-        use chacha20::{XChaCha20, cipher::{KeyIvInit, StreamCipher}};
+        // Decrypt the payload using ChaCha20
         let mut ptk = edk.to_vec();
-        let mut cipher = XChaCha20::new(ek.as_bytes().into(), n.into());
+        let mut cipher = XChaCha20::new_from_slices(ek.as_bytes(), n.into()).unwrap();
         cipher.apply_keystream(&mut ptk);
 
         return Ok(ptk);
@@ -461,9 +458,8 @@ pub fn decode_paserk(
         let n = Blake2bParams::new().hash_length(24).hash(&n_msg);
         
         // Decrypt the local key
-        use chacha20::{XChaCha20, cipher::{KeyIvInit, StreamCipher}};
         let mut ptk = edk.to_vec();
-        let mut cipher = XChaCha20::new(ek.as_bytes().into(), n.as_bytes().into());
+        let mut cipher = XChaCha20::new_from_slices(ek.as_bytes(), n.as_bytes().into()).unwrap();
         cipher.apply_keystream(&mut ptk);
         
         return Ok(ptk);
@@ -708,7 +704,7 @@ pub fn paserk_wrap_pie(wrapping_key: &[u8], target_key: &[u8], purpose: &str) ->
     let ak = blake2b_mac(wrapping_key, &ak_msg, 32);
 
     let mut c = target_key.to_vec();
-    let mut cipher = XChaCha20::new(ek.into(), n2.into());
+    let mut cipher = XChaCha20::new_from_slices(ek.into(), n2.into()).unwrap();
     cipher.apply_keystream(&mut c);
 
     let mut t_msg = header.as_bytes().to_vec();
@@ -758,7 +754,7 @@ pub fn paserk_unwrap_pie(wrapping_key: &[u8], paserk: &str) -> Result<Vec<u8>, W
     let n2 = &x[32..56];
 
     let mut plaintext = c.to_vec();
-    let mut cipher = XChaCha20::new(ek.into(), n2.into());
+    let mut cipher = XChaCha20::new_from_slices(ek.into(), n2.into()).unwrap();
     cipher.apply_keystream(&mut plaintext);
 
     Ok(plaintext)
@@ -795,7 +791,7 @@ pub fn paserk_wrap_pbkw(password: &[u8], target_key: &[u8], purpose: &str, memli
     let ak = blake2b(&ak_msg, 32);
 
     let mut c = target_key.to_vec();
-    let mut cipher = XChaCha20::new(ek[..].into(), nonce.as_slice().into());
+    let mut cipher = XChaCha20::new_from_slices(&ek, &nonce).unwrap();
     cipher.apply_keystream(&mut c);
 
     let mut t_msg = header.as_bytes().to_vec();
@@ -874,7 +870,7 @@ pub fn paserk_unwrap_pbkw(password: &[u8], paserk: &str) -> Result<Vec<u8>, Webt
     if t != expected_t { return Err(WebtokenError::InvalidSignature); }
 
     let mut plaintext = c.to_vec();
-    let mut cipher = XChaCha20::new(ek[..].into(), nonce.into());
+    let mut cipher = XChaCha20::new_from_slices(&ek, nonce.into()).unwrap();
     cipher.apply_keystream(&mut plaintext);
 
     Ok(plaintext)
@@ -919,7 +915,7 @@ pub fn paserk_seal(sealing_key: &[u8], target_key: &[u8]) -> Result<String, Webt
     let nonce = blake2b(&n_msg, 24);
 
     let mut c = target_key.to_vec();
-    let mut cipher = XChaCha20::new(ek[..].into(), nonce.as_slice().into());
+    let mut cipher = XChaCha20::new_from_slices(&ek, &nonce).unwrap();
     cipher.apply_keystream(&mut c);
 
     let mut t_msg = header.as_bytes().to_vec();
@@ -1005,7 +1001,7 @@ pub fn paserk_unseal(unsealing_key: &[u8], paserk: &str) -> Result<Vec<u8>, Webt
     let nonce = blake2b(&n_msg, 24);
 
     let mut plaintext = c.to_vec();
-    let mut cipher = XChaCha20::new(ek[..].into(), nonce.as_slice().into());
+    let mut cipher = XChaCha20::new_from_slices(&ek, &nonce).unwrap();
     cipher.apply_keystream(&mut plaintext);
 
     Ok(plaintext)

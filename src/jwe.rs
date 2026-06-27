@@ -1,9 +1,11 @@
+use std::{borrow::Cow, io::{Read, Write}};
+
 use serde_json::{Value, json};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use crate::{WebtokenError, crypto, py_utils::decode_base64_permissive};
-use std::borrow::Cow;
-use std::io::{Read, Write};
 use flate2::{read::DeflateDecoder, write::DeflateEncoder, Compression};
+
+use crate::{WebtokenError, crypto, py_utils::decode_base64_permissive};
+
 
 // ============================================================================
 //  Key Management (ALG)
