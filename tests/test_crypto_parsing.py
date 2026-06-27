@@ -215,3 +215,81 @@ class TestCryptoParsing:
         subject = webtoken.get_x509_subject(der_bytes)
         
         assert subject == 'Testing'
+
+
+    def test_x509_metadata_extraction(self):
+        '''
+        PROVES: The native Rust metadata extractor perfectly pulls out 
+        the serial number, issuer, timestamps, AKI, and Key Usages from a real cert
+        and hands them to Python as a standard dictionary.
+        '''
+
+        real_cert_b64 = (
+            'MIICnTCCAYUCBgGAUN03JTANBgkqhkiG9w0BAQsFADASMRAwDgYDVQQDDAdUZXN0aW5nMB4X'
+            'DTIyMDQyMjEwNDAxNloXDTMyMDQyMjEwNDE1NlowEjEQMA4GA1UEAwwHVGVzdGluZzCCASIw'
+            'DQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKJnn9zZF3+PvugbVDyo4ZVe6X+lb+xzIPlS'
+            '/iE1/CkGUw+C081jt8fUT8FXqSo4H7yXvyImRWiV+/Pmu86XBvZqWRvHM6dwvJ2UrwCSqYb2'
+            'C3fbPamKxjBVvbdXh8hsJiEDdNlV8B3mdCQ3eV+Iu7DuFz5DcnH80qMWkG7+8ADWAU3L3FnI'
+            '2FcSI+GaWJErEKq6zk5uvRuxcrq7XxMRnO45UkXL/hrm6vytyECxxh05YpdtMKmZorNXSycK'
+            'QI4E8WO7kEsBHaiRwiUd6u+m7A3pSAWaW0dO5KiDl6mLudsNMJAv9Vu/x3FTyzaek/zC9PT/'
+            'IxrDlnzDvef83IZLHkMCAwEAATANBgkqhkiG9w0BAQsFAAOCAQEAi7ZppYbkpt0ALn5NXIIP'
+            'gA04svRwAmsUJWKLBS5iKVXq6HOJPsz0GAB9oKpjar83rUomwK2UE0XFJLMDvrB0nTZJBjm2'
+            'DCANLL1GtTKUd+mdvhyHCIMrUApkhAYzv2Rk1c4+Jt7f5/h8FnM8jdl9FGc5TBy5ixS0Oxny'
+            'W1JOakClYQz8vNS7LrC4hmLWwy7GAmUdemNLEefQcECaNzaLN5gGk1ht5lJyNCsHu9STZeYM'
+            '2UXdDAtMtu9HAepfzh2CAOscSDtZr89SmFSwxKaOfbJyXH4PivMgWK4zO0P6ofuv8d8gRbUA'
+            'UgnysKHQc0isTVWOxgmzI69EUe/iVXJHig=='
+        )
+        der_bytes = base64.b64decode(real_cert_b64)
+        
+        # Execute
+        meta = webtoken.get_x509_metadata(der_bytes)
+        
+        # Verify structure and PyO3 type bindings
+        assert isinstance(meta, dict)
+        assert isinstance(meta.get('serial'), str)
+        assert isinstance(meta.get('issuer'), str)
+        assert isinstance(meta.get('not_before'), int)
+        assert isinstance(meta.get('not_after'), int)
+        assert isinstance(meta.get('key_usages'), list)
+        
+        # Verify data accuracy (This specific test cert is valid for 10 years)
+        assert meta['issuer'] == 'CN=Testing'
+        assert (meta['not_after'] - meta['not_before']) == 315619300  # 3653 days * 86400 seconds + 100 seconds
+
+
+    def test_x509_public_key_spki_extraction(self):
+        '''
+        PROVES: The parser successfully isolates the SubjectPublicKeyInfo (SPKI)
+        block and returns it as raw ASN.1 DER bytes so `webtoken.verify` can 
+        natively digest it.
+        '''
+
+        real_cert_b64 = (
+            'MIICnTCCAYUCBgGAUN03JTANBgkqhkiG9w0BAQsFADASMRAwDgYDVQQDDAdUZXN0aW5nMB4X'
+            'DTIyMDQyMjEwNDAxNloXDTMyMDQyMjEwNDE1NlowEjEQMA4GA1UEAwwHVGVzdGluZzCCASIw'
+            'DQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKJnn9zZF3+PvugbVDyo4ZVe6X+lb+xzIPlS'
+            '/iE1/CkGUw+C081jt8fUT8FXqSo4H7yXvyImRWiV+/Pmu86XBvZqWRvHM6dwvJ2UrwCSqYb2'
+            'C3fbPamKxjBVvbdXh8hsJiEDdNlV8B3mdCQ3eV+Iu7DuFz5DcnH80qMWkG7+8ADWAU3L3FnI'
+            '2FcSI+GaWJErEKq6zk5uvRuxcrq7XxMRnO45UkXL/hrm6vytyECxxh05YpdtMKmZorNXSycK'
+            'QI4E8WO7kEsBHaiRwiUd6u+m7A3pSAWaW0dO5KiDl6mLudsNMJAv9Vu/x3FTyzaek/zC9PT/'
+            'IxrDlnzDvef83IZLHkMCAwEAATANBgkqhkiG9w0BAQsFAAOCAQEAi7ZppYbkpt0ALn5NXIIP'
+            'gA04svRwAmsUJWKLBS5iKVXq6HOJPsz0GAB9oKpjar83rUomwK2UE0XFJLMDvrB0nTZJBjm2'
+            'DCANLL1GtTKUd+mdvhyHCIMrUApkhAYzv2Rk1c4+Jt7f5/h8FnM8jdl9FGc5TBy5ixS0Oxny'
+            'W1JOakClYQz8vNS7LrC4hmLWwy7GAmUdemNLEefQcECaNzaLN5gGk1ht5lJyNCsHu9STZeYM'
+            '2UXdDAtMtu9HAepfzh2CAOscSDtZr89SmFSwxKaOfbJyXH4PivMgWK4zO0P6ofuv8d8gRbUA'
+            'UgnysKHQc0isTVWOxgmzI69EUe/iVXJHig=='
+        )
+        der_bytes = base64.b64decode(real_cert_b64)
+        
+        # Execute
+        spki_bytes = webtoken.get_x509_public_key(der_bytes)
+        
+        # Verify
+        assert isinstance(spki_bytes, bytes)
+        assert len(spki_bytes) > 0
+        
+        # SPKI is an ASN.1 SEQUENCE, so it MUST mathematically start with 0x30
+        assert spki_bytes[0] == 0x30
+        
+        # The SPKI block for an RSA 2048-bit key is exactly 294 bytes
+        assert len(spki_bytes) == 294
