@@ -1,4 +1,9 @@
+
+use std::{net::{IpAddr, Ipv4Addr}, str::FromStr, time::Duration,
+};
+
 use base64::{engine::general_purpose::{URL_SAFE_NO_PAD}, Engine as _};
+
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::exceptions::PyValueError;
@@ -11,45 +16,47 @@ use graviola::signing::eddsa::{Ed25519SigningKey, Ed25519VerifyingKey};
 // [Key Agreement]
 use graviola::key_agreement::x25519::{StaticPrivateKey, PublicKey as X25519PublicKey};
 
-// [AWS-LC-RS] - Core & Random
-use aws_lc_rs::rand::SystemRandom;
-use aws_lc_rs::rsa::KeySize;
-
-// [AWS-LC-RS] AEAD (AES-GCM)
-use aws_lc_rs::aead::{UnboundKey, LessSafeKey, Nonce, Aad, AES_128_GCM, AES_256_GCM}; 
-
-// [AWS-LC-RS] Cipher (AES-CBC & Key Wrap)
-use aws_lc_rs::cipher::{
-    PaddedBlockEncryptingKey, PaddedBlockDecryptingKey, 
-    UnboundCipherKey, EncryptionContext, DecryptionContext,
-    AES_128, AES_192, AES_256
+// [AWS-LC-RS] - Consolidated Imports
+use aws_lc_rs::{
+    aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM, AES_256_GCM},
+    cipher::{
+        DecryptionContext, EncryptionContext, PaddedBlockDecryptingKey,
+        PaddedBlockEncryptingKey, UnboundCipherKey, AES_128, AES_192, AES_256,
+    },
+    encoding::AsDer,
+    iv::FixedLength,
+    key_wrap::{AesKek, KeyWrap, AES_128 as KW_AES_128, AES_256 as KW_AES_256},
+    rand::SystemRandom,
+    rsa::{
+        KeySize, OaepPrivateDecryptingKey, OaepPublicEncryptingKey, Pkcs1PrivateDecryptingKey,
+        Pkcs1PublicEncryptingKey, PrivateDecryptingKey, PublicEncryptingKey,
+        OAEP_SHA256_MGF1SHA256, OAEP_SHA384_MGF1SHA384, OAEP_SHA512_MGF1SHA512,
+    },
+    signature::{
+        EcdsaKeyPair, KeyPair, RsaKeyPair, UnparsedPublicKey, ECDSA_P256K1_SHA256_FIXED,
+        ECDSA_P256K1_SHA256_FIXED_SIGNING, ECDSA_P256_SHA256_ASN1_SIGNING,
+        ECDSA_P256_SHA256_FIXED, ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P384_SHA384_FIXED,
+        ECDSA_P384_SHA384_FIXED_SIGNING, ECDSA_P521_SHA512_FIXED,
+        ECDSA_P521_SHA512_FIXED_SIGNING, RSA_PKCS1_2048_8192_SHA256,
+        RSA_PKCS1_2048_8192_SHA384, RSA_PKCS1_2048_8192_SHA512, RSA_PKCS1_SHA256,
+        RSA_PKCS1_SHA384, RSA_PKCS1_SHA512, RSA_PSS_2048_8192_SHA256,
+        RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512, RSA_PSS_SHA256, RSA_PSS_SHA384,
+        RSA_PSS_SHA512,
+    },
 };
-use aws_lc_rs::key_wrap::{AesKek, KeyWrap, AES_128 as KW_AES_128, AES_256 as KW_AES_256};
-use aws_lc_rs::iv::FixedLength;
 
-// [AWS-LC-RS] RSA Encryption
-use aws_lc_rs::rsa::{
-    PrivateDecryptingKey, PublicEncryptingKey,
-    OaepPrivateDecryptingKey, OaepPublicEncryptingKey,
-    Pkcs1PrivateDecryptingKey, Pkcs1PublicEncryptingKey,
-    OAEP_SHA256_MGF1SHA256, OAEP_SHA384_MGF1SHA384, OAEP_SHA512_MGF1SHA512
+use x509_cert::{
+    builder::{Builder, CertificateBuilder, profile::cabf::Root},
+    ext::pkix::{name::GeneralName, SubjectAltName},
+    name::Name,
+    serial_number::SerialNumber,
+    time::Validity,
+    spki::{SubjectPublicKeyInfo, AlgorithmIdentifierOwned},
+    der::{Any, asn1::BitString},
+    der::Encode,
 };
 
-// [AWS-LC-RS] Signatures
-use aws_lc_rs::signature::{
-    KeyPair, EcdsaKeyPair, RsaKeyPair,
-    ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P384_SHA384_FIXED_SIGNING,
-    ECDSA_P521_SHA512_FIXED_SIGNING, ECDSA_P256K1_SHA256_FIXED_SIGNING,
-    ECDSA_P256_SHA256_FIXED, ECDSA_P384_SHA384_FIXED,
-    ECDSA_P521_SHA512_FIXED, ECDSA_P256K1_SHA256_FIXED,
-    RSA_PKCS1_2048_8192_SHA256, RSA_PKCS1_2048_8192_SHA384, RSA_PKCS1_2048_8192_SHA512,
-    RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512,
-    RSA_PKCS1_SHA256, RSA_PKCS1_SHA384, RSA_PKCS1_SHA512,
-    RSA_PSS_SHA256, RSA_PSS_SHA384, RSA_PSS_SHA512,
-    UnparsedPublicKey
-};
-use aws_lc_rs::encoding::AsDer;
-
+use signature::Keypair;
 use blake2b_simd::Params as Blake2bParams;
 use chacha20::{XChaCha20, cipher::{KeyIvInit, StreamCipher}};
 
@@ -58,8 +65,10 @@ use num_integer::Integer;
 use num_traits::{One, Zero};
 
 use crate::{WebtokenError, BytesOrString};
-use crate::crypto_parsing::{decode_key_bytes, wrap_pkcs1_as_pkcs8, extract_x25519_bytes,
-    to_pem, ssh_to_pem};
+use crate::crypto_parsing::{
+    decode_key_bytes, wrap_pkcs1_as_pkcs8, extract_x25519_bytes, to_pem, ssh_to_pem
+};
+
 
 const XCHACHA_KEY_LEN: usize = 32;
 const XCHACHA_NONCE_LEN: usize = 24;
@@ -1190,6 +1199,123 @@ fn decrypt_xc20p<'py>(
 }
 
 
+
+struct AwsCertSigner {
+    key: EcdsaKeyPair,
+}
+
+#[derive(Clone)]
+struct AwsCertVerifier {
+    pub_bytes: Vec<u8>,
+}
+
+impl Keypair for AwsCertSigner {
+    type VerifyingKey = AwsCertVerifier;
+    fn verifying_key(&self) -> Self::VerifyingKey {
+        AwsCertVerifier {
+            pub_bytes: self.key.public_key().as_ref().to_vec(),
+        }
+    }
+}
+
+impl x509_cert::spki::EncodePublicKey for AwsCertVerifier {
+    fn to_public_key_der(&self) -> x509_cert::spki::Result<x509_cert::der::Document> {
+        use x509_cert::der::Encode;
+        
+        // Wrap the raw AWS-LC Public Key into an x509-cert SPKI structure
+        let spki_alg = AlgorithmIdentifierOwned {
+            oid: x509_cert::der::asn1::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1"),
+            parameters: Some(Any::encode_from(&x509_cert::der::asn1::ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7")).unwrap()),
+        };
+        
+        let pub_key_info = SubjectPublicKeyInfo {
+            algorithm: spki_alg,
+            subject_public_key: BitString::from_bytes(&self.pub_bytes).unwrap(),
+        };
+        
+        // Encode the full SPKI sequence to DER bytes, then return as a Document
+        let der_bytes = pub_key_info.to_der().unwrap();
+        Ok(x509_cert::der::Document::try_from(der_bytes.as_slice()).unwrap())
+    }
+}
+
+impl x509_cert::spki::DynSignatureAlgorithmIdentifier for AwsCertSigner {
+    // Return spki::Result instead of der::Result
+    fn signature_algorithm_identifier(&self) -> x509_cert::spki::Result<AlgorithmIdentifierOwned> {
+        Ok(AlgorithmIdentifierOwned {
+            oid: x509_cert::der::asn1::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"),
+            parameters: None,
+        })
+    }
+}
+
+
+#[pyfunction]
+pub fn generate_localhost_cert() -> PyResult<(String, String)> {
+
+    let rng = SystemRandom::new();
+    let pkcs8_doc = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
+        .map_err(|e| PyValueError::new_err(format!("Key Gen err: {:?}", e)))?;
+        
+    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8_doc.as_ref())
+        .map_err(|e| PyValueError::new_err(format!("Key Parse err: {:?}", e)))?;
+
+    // Wrap the key in our custom struct
+    let signer = AwsCertSigner { key: key_pair };
+
+    let spki_alg = AlgorithmIdentifierOwned {
+        oid: x509_cert::der::asn1::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1"),
+        parameters: Some(Any::encode_from(&x509_cert::der::asn1::ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7")).unwrap()),
+    };
+    
+    let pub_key_info = SubjectPublicKeyInfo {
+        algorithm: spki_alg,
+        subject_public_key: BitString::from_bytes(&signer.verifying_key().pub_bytes).unwrap(),
+    };
+
+    let subject = Name::from_str("CN=localhost,O=Localhost,C=US")
+        .map_err(|e| PyValueError::new_err(format!("Name err: {}", e)))?;
+        
+    let mut serial_bytes = [0u8; 16];
+    aws_lc_rs::rand::fill(&mut serial_bytes).unwrap();
+    serial_bytes[0] &= 0x7f; 
+    let serial = SerialNumber::new(&serial_bytes).unwrap();
+    
+    let validity = Validity::from_now(Duration::from_secs(3650 * 24 * 60 * 60))
+        .map_err(|e| PyValueError::new_err(format!("Time err: {}", e)))?;
+
+    let profile = Root::new(false, subject)
+        .map_err(|e| PyValueError::new_err(format!("Profile err: {}", e)))?;
+        
+    let mut builder = CertificateBuilder::new(profile, serial, validity, pub_key_info)
+        .map_err(|e| PyValueError::new_err(format!("Builder err: {}", e)))?;
+
+    let san = SubjectAltName(vec![
+        GeneralName::DnsName(x509_cert::der::asn1::Ia5String::new("localhost").unwrap()),
+        GeneralName::from(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+    ]);
+    
+    builder.add_extension(&san)
+        .map_err(|e| PyValueError::new_err(format!("SAN err: {}", e)))?;
+
+    let tbs_blob = builder.finalize(&signer)
+        .map_err(|e| PyValueError::new_err(format!("Finalize err: {}", e)))?;
+        
+    let signature = signer.key.sign(&rng, &tbs_blob)
+        .map_err(|e| PyValueError::new_err(format!("Sign err: {:?}", e)))?;
+        
+    let cert = builder.assemble(BitString::from_bytes(signature.as_ref()).unwrap(), &signer)
+        .map_err(|e| PyValueError::new_err(format!("Assemble err: {}", e)))?;
+
+    let cert_der = cert.to_der().map_err(|e| PyValueError::new_err(format!("DER err: {}", e)))?;
+    
+    let cert_pem = String::from_utf8(to_pem("CERTIFICATE", &cert_der)).unwrap();
+    let priv_key_pem = String::from_utf8(to_pem("PRIVATE KEY", pkcs8_doc.as_ref())).unwrap();
+
+    Ok((cert_pem, priv_key_pem))
+}
+
+
 pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(digest, m)?)?;
     m.add_function(wrap_pyfunction!(load_pem_private_key, m)?)?;
@@ -1202,6 +1328,7 @@ pub fn export_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(random_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(generate_pkce_pair, m)?)?;
     m.add_function(wrap_pyfunction!(generate_key_pair, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_localhost_cert, m)?)?;
     m.add_function(wrap_pyfunction!(sign_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_py, m)?)?;
     m.add_function(wrap_pyfunction!(ed25519_public_from_seed_py, m)?)?;

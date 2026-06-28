@@ -15,6 +15,8 @@ aws-lc-rs = { version = "=1.17" }
 graviola = "0.4"
 blake2b_simd = "1.0.4"
 chacha20 = { version = "0.10.1", features = ["xchacha"] }
+x509-cert = { version = "0.3.0-rc.4", features = ["builder", "pem"] }
+signature = "3.0.0"
 argon2 = "0.5.3"
 flate2 = "1.1.9"
 subtle = "2.6"
@@ -44,5 +46,5 @@ features = ["extension-module", "abi3-py312", "abi3t", "py-clone", "time"]
 opt-level = 3       
 lto = "fat"        
 codegen-units = 1   
-panic = "abort"     
+# panic = "abort"     
 strip = true        

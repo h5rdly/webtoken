@@ -7,7 +7,7 @@
 
 ##  Size
 
-The `.so` size on linux is ~`3.9Mb`, no external dependencies.
+The `.so` size on linux is ~`4.4Mb`, no external dependencies.
 
 Simple RAM usage [benchmark](https://github.com/h5rdly/webtoken/blob/main/benchmarks/mem_benchmark.py) -
 
